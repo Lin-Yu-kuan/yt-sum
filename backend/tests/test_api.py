@@ -855,3 +855,27 @@ def test_analyze_no_subtitle_long_video_skips_auto_and_supports_on_demand(tmp_pa
     assert "00:00:10,000 -->" in dl_res.text
     assert "這是長片按需聽寫測試。" in dl_res.text
     assert ai_calls["count"] == 1
+
+
+def test_user_data_paths_under_project_data_dir():
+    from pathlib import Path
+    import main as main_module
+    from services import youtube_service
+
+    project_root = Path(__file__).resolve().parents[2]
+    data_dir = project_root / "data"
+    legacy_home_dir = Path.home() / ".yt-sum"
+
+    assert history_service.HISTORY_DIR == data_dir / "history"
+    assert gemini_service.USER_CONFIG_DIR == data_dir
+    assert gemini_service.USER_CONFIG_FILE == data_dir / "config.json"
+    assert main_module.DOWNLOADS_DIR == data_dir / "downloads"
+    assert youtube_service.DEFAULT_COOKIES_PATHS[0] == data_dir / "cookies.txt"
+
+    for p in (
+        history_service.HISTORY_DIR,
+        gemini_service.USER_CONFIG_DIR,
+        main_module.DOWNLOADS_DIR,
+        *youtube_service.DEFAULT_COOKIES_PATHS,
+    ):
+        assert legacy_home_dir not in p.parents and p != legacy_home_dir

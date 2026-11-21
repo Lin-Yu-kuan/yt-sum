@@ -17,9 +17,10 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 PREFERRED_LANGS = ["zh-TW", "zh-Hant", "zh", "zh-Hans", "zh-CN", "en", "en-US", "ja"]
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BACKEND_ROOT.parent
 DEFAULT_COOKIES_PATHS = (
+    PROJECT_ROOT / "data" / "cookies.txt",
     BACKEND_ROOT / "cookies.txt",
-    Path.home() / ".yt-sum" / "cookies.txt",
 )
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
@@ -68,7 +69,7 @@ def format_ytdlp_error(raw_error: str) -> str:
             "YouTube 觸發反機器人驗證（Sign in to confirm you're not a bot），"
             "目前無法透過本機 IP 直接存取串流。建議先關閉 VPN 或稍後再試；"
             "若需使用 MP4/MP3 下載功能，請將瀏覽器匯出的 cookies.txt 放置於 "
-            "`backend/cookies.txt`（或 `~/.yt-sum/cookies.txt`），"
+            "`data/cookies.txt`（或 `backend/cookies.txt`），"
             "或在 `backend/.env` 設定 `YOUTUBE_COOKIES_FILE` / `YOUTUBE_COOKIES_FROM_BROWSER`。"
         )
     return cleaned or "yt-dlp 執行失敗"

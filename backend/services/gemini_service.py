@@ -16,7 +16,8 @@ try:
 except ImportError:  # pragma: no cover - 執行環境未安裝時安全降級
     OpenCC = None  # type: ignore[assignment]
 
-USER_CONFIG_DIR = Path.home() / ".yt-sum"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+USER_CONFIG_DIR = PROJECT_ROOT / "data"
 USER_CONFIG_FILE = USER_CONFIG_DIR / "config.json"
 FALLBACK_MODELS = (
     "gemini-3.5-flash-lite",
@@ -116,7 +117,7 @@ def normalize_knowledge_to_zh_tw(output: GeminiKnowledgeOutput) -> GeminiKnowled
 
 
 def load_local_api_key() -> str:
-    """從使用者本機資料夾 (~/.yt-sum/config.json) 讀取儲存的 API Key"""
+    """從專案資料夾 (data/config.json) 讀取儲存的 API Key"""
     try:
         if USER_CONFIG_FILE.exists():
             data = json.loads(USER_CONFIG_FILE.read_text(encoding="utf-8"))

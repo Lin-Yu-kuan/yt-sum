@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 backend/.env
 backend/downloads/
+backend/cookies.txt
+data/
 
 # Next.js / Node.js
 node_modules/

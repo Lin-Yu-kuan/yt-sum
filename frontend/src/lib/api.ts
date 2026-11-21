@@ -17,6 +17,9 @@ function getApiBase(): string {
 }
 
 async function parseError(res: Response): Promise<string> {
+  if (res.status === 405) {
+    return "後端服務版本過舊（HTTP 405），請重新啟動本機伺服器後再試";
+  }
   try {
     const data = await res.json();
     if (typeof data?.detail === "string") return data.detail;

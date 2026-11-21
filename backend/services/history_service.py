@@ -6,7 +6,8 @@ from pathlib import Path
 from services.gemini_service import to_traditional_chinese
 
 
-HISTORY_DIR = Path.home() / ".yt-sum" / "history"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+HISTORY_DIR = PROJECT_ROOT / "data" / "history"
 
 
 def _safe_video_path(video_id: str) -> Path:
@@ -20,7 +21,7 @@ def save_history(
     mastered_ids: list[str] | None = None,
     chat_messages: list[dict] | None = None,
 ) -> dict:
-    """將影片分析結果與學習進度儲存於本機 (~/.yt-sum/history/)"""
+    """將影片分析結果與學習進度儲存於專案 data/history/"""
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     path = _safe_video_path(analysis["video_id"])
 

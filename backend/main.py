@@ -67,7 +67,7 @@ from services.youtube_service import (
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-DOWNLOADS_DIR = BASE_DIR / "downloads"
+DOWNLOADS_DIR = BASE_DIR.parent / "data" / "downloads"
 DOWNLOAD_TASKS: dict[str, dict] = {}
 
 app = FastAPI(title="YT-Sum Knowledge Navigator API", version="1.0.0")

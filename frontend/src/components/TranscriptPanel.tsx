@@ -89,13 +89,17 @@ export default function TranscriptPanel({
         videoId: data.video_id,
         apiKey,
       });
+      if (!res.transcript_lines || res.transcript_lines.length === 0) {
+        setTranslateError("未能取得逐字稿內容，請確認影片狀態或稍後再試");
+        return;
+      }
       onTranscriptUpdated({
         transcript_language: res.transcript_language,
         transcript_lines: res.transcript_lines,
         transcript_zh_tw_lines: res.transcript_zh_tw_lines,
       });
       if (!res.cached) {
-        onNotify?.("已完成 AI 語音聽寫並快取於本機！");
+        onNotify?.("已取得逐字稿並快取於本機！");
       }
     } catch (err) {
       setTranslateError(
@@ -211,7 +215,7 @@ export default function TranscriptPanel({
           <Loader2 className="w-5 h-5 animate-spin text-[var(--accent-purple)]" />
           <p>
             {transcribing
-              ? "正在透過 AI 聆聽影片並產生時間軸逐字稿（完成後會永久快取於本機）..."
+              ? "正在取得逐字稿（優先抓取 YouTube 字幕，無字幕時啟動 AI 語音聽寫）..."
               : "正在轉換為台灣繁體中文逐字稿（完成後會自動快取於本機）..."}
           </p>
         </div>
@@ -243,15 +247,7 @@ export default function TranscriptPanel({
                 className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white cursor-pointer transition"
               >
                 <Mic className="w-3.5 h-3.5" />
-                使用 AI 語音聽寫生成逐字稿
-              </button>
-              <button
-                type="button"
-                onClick={handleSelectZhTw}
-                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] hover:bg-[var(--bg-elevated)] text-[var(--text-main)] cursor-pointer transition"
-              >
-                <Languages className="w-3.5 h-3.5" />
-                直接聽寫並轉為繁體中文
+                取得原語言逐字稿（優先抓字幕，無字幕才 AI 聽寫）
               </button>
             </div>
           )}
