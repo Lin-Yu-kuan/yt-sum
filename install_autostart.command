@@ -124,10 +124,23 @@ if [ "$IS_UP" -eq 1 ]; then
     echo ""
     echo "[完成] YT-Sum 後端已在背景常駐啟動，且登入 Mac 時會自動開啟！"
     echo "現在你可以直接從 Dock / 桌面打開 YT-Sum PWA 使用。"
-    open "http://localhost:8000" >/dev/null 2>&1 || true
+    if [ "${YTSUM_NO_OPEN:-0}" != "1" ]; then
+        open "http://localhost:8000" >/dev/null 2>&1 || true
+    fi
 else
     echo ""
     echo "[提示] LaunchAgent 已安裝，但尚未確認服務就緒，請檢視紀錄：$LOG_PATH"
 fi
 
-read -r -p "按 Enter 鍵關閉..."
+SHOULD_PAUSE=1
+if [ "${YTSUM_NO_PAUSE:-0}" = "1" ]; then
+    SHOULD_PAUSE=0
+fi
+for arg in "$@"; do
+    if [ "$arg" = "--no-pause" ]; then
+        SHOULD_PAUSE=0
+    fi
+done
+if [ "$SHOULD_PAUSE" -eq 1 ]; then
+    read -r -p "按 Enter 鍵關閉..."
+fi
