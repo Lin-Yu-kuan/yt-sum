@@ -1,4 +1,4 @@
-const CACHE_NAME = "yt-sum-static-v1";
+const CACHE_NAME = "yt-sum-static-v3";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());

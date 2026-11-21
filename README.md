@@ -52,10 +52,24 @@ yt-sum/
 
 ## 安裝為桌面 PWA App
 
-本專案已支援 **PWA（Progressive Web App）**，可安裝成獨立無網址列的桌面視窗（使用時仍需保持 `run_app.bat` 或 `run_app.command` 在背景執行）：
+本專案已支援 **PWA（Progressive Web App）**，可安裝成獨立無網址列的桌面視窗：
 
 - **Windows / macOS（Chrome / Edge）**：開啟 `http://localhost:8000` 後，點擊右上角 **「安裝 App」** 按鈕（或網址列右側的安裝圖示）。
 - **macOS Safari（macOS Sonoma 以上）**：開啟 `http://localhost:8000` 後，點選 Safari 上方選單列 **「檔案 → 加入 Dock」**（或點擊網頁右上角「安裝 App」查看指引）。
+- **離線唯讀快取**：只要在連線狀態下瀏覽或開啟過的歷史筆記，即使暫時關閉後端服務，桌面 PWA 仍可讀取瀏覽器快取中的清單與筆記（唯讀）；啟動後端後約 3 秒會自動重連同步。
+
+---
+
+## 背景常駐模式（免開終端機，直接點桌面 PWA 即用）
+
+桌面 PWA 仍需要本機的 Python FastAPI 後端提供 AI 解析與下載能力。若不想每次使用都手動開啟 `run_app.bat` / `run_app.command`，可改用一次性背景常駐安裝：
+
+- **Windows**：
+  - 安裝開機無黑框背景常駐並立即啟動：雙擊 `install_autostart.bat`（或於 PowerShell 執行 `powershell -ExecutionPolicy Bypass -File .\install_autostart.ps1`）
+  - 移除開機常駐並停止背景服務：雙擊 `uninstall_autostart.bat`
+- **macOS**：
+  - 安裝登入自動啟動 LaunchAgent 並立即啟動：雙擊 `install_autostart.command`（初次授權同 `run_app.command`）
+  - 停止並移除背景常駐：雙擊 `uninstall_autostart.command`
 
 ---
 

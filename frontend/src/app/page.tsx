@@ -16,10 +16,12 @@ import {
   Music,
   PanelRightClose,
   PanelRightOpen,
+  RefreshCw,
   ScrollText,
   Sparkles,
   Sun,
   Trash2,
+  WifiOff,
   Workflow,
   Youtube,
 } from "lucide-react";
@@ -50,6 +52,13 @@ import {
   updateHistoryState,
 } from "@/lib/api";
 import { buildExternalGeminiPrompt, buildMarkdownNote } from "@/lib/exportMarkdown";
+import {
+  loadCachedHistoryItem,
+  loadCachedHistoryList,
+  removeCachedHistoryItem,
+  saveCachedHistoryItem,
+  saveCachedHistoryList,
+} from "@/lib/offlineCache";
 import {
   ChatMessage,
   HealthStatus,
@@ -107,14 +116,60 @@ export default function HomePage() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [backendStatus, setBackendStatus] = useState<"checking" | "online" | "offline">(
+    "checking"
+  );
+  const backendStatusRef = useRef<"checking" | "online" | "offline">("checking");
+  const syncingRef = useRef(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [isMac, setIsMac] = useState(false);
 
   const refreshHistory = () => {
     fetchHistoryList()
-      .then(setHistoryItems)
+      .then((items) => {
+        setHistoryItems(items);
+        saveCachedHistoryList(items);
+      })
       .catch(() => {});
   };
 
+  const syncFromBackend = async (options?: { announceReconnect?: boolean }) => {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    setReconnecting(true);
+    try {
+      const h = await fetchHealth();
+      const wasOffline = backendStatusRef.current === "offline";
+      setHealth(h);
+      backendStatusRef.current = "online";
+      setBackendStatus("online");
+      try {
+        const items = await fetchHistoryList();
+        setHistoryItems(items);
+        saveCachedHistoryList(items);
+      } catch {
+        // ignore history error when health already passed
+      }
+      if (wasOffline && options?.announceReconnect) {
+        showToast("已重新連線本機後端服務，歷史紀錄已同步！");
+      }
+    } catch {
+      setHealth(null);
+      backendStatusRef.current = "offline";
+      setBackendStatus("offline");
+      const cached = loadCachedHistoryList();
+      if (cached.length > 0) {
+        setHistoryItems(cached);
+      }
+    } finally {
+      syncingRef.current = false;
+      setReconnecting(false);
+    }
+  };
+
   useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad/i.test(navigator.userAgent));
+
     const savedKey = localStorage.getItem("yt_sum_gemini_key");
     if (savedKey) setApiKey(savedKey);
 
@@ -134,11 +189,16 @@ export default function HomePage() {
       document.documentElement.classList.add(`font-${savedFont}`);
     }
 
-    fetchHealth()
-      .then(setHealth)
-      .catch(() => setHealth(null));
-    refreshHistory();
+    syncFromBackend();
   }, []);
+
+  useEffect(() => {
+    if (backendStatus !== "offline") return;
+    const timer = window.setInterval(() => {
+      syncFromBackend({ announceReconnect: true });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [backendStatus]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -205,6 +265,12 @@ export default function HomePage() {
       setSeekTarget(null);
       setViewMode("layers");
       setPanelCollapsed(false);
+      saveCachedHistoryItem(res.video_id, {
+        analysis: res,
+        mastered_ids: [],
+        chat_messages: [],
+        saved_at: new Date().toISOString(),
+      });
       refreshHistory();
       showToast("分析完成，已自動保存至本機紀錄！");
     } catch (err) {
@@ -218,6 +284,7 @@ export default function HomePage() {
     setError(null);
     try {
       const record = await loadHistoryItem(videoId);
+      saveCachedHistoryItem(videoId, record);
       setAnalysis(record.analysis);
       setMasteredIds(new Set(record.mastered_ids || []));
       setChatMessages(record.chat_messages || []);
@@ -226,6 +293,22 @@ export default function HomePage() {
       setViewMode("layers");
       setPanelCollapsed(false);
     } catch (err) {
+      const cached = loadCachedHistoryItem(videoId);
+      if (cached) {
+        setAnalysis(cached.analysis);
+        setMasteredIds(new Set(cached.mastered_ids || []));
+        setChatMessages(cached.chat_messages || []);
+        setUrl(`https://www.youtube.com/watch?v=${videoId}`);
+        setSeekTarget(null);
+        setViewMode("layers");
+        setPanelCollapsed(false);
+        showToast("目前為離線模式，已從瀏覽器快取開啟筆記（唯讀）");
+        return;
+      }
+      if (backendStatusRef.current === "offline") {
+        showToast("本機後端服務尚未啟動，此筆筆記尚未離線快取，請先啟動後端服務");
+        return;
+      }
       showToast(err instanceof Error ? err.message : "讀取保存紀錄失敗");
     }
   };
@@ -241,6 +324,7 @@ export default function HomePage() {
     setPendingDelete(null);
     try {
       await deleteHistoryItem(targetId);
+      removeCachedHistoryItem(targetId);
       setHistoryItems((prev) => prev.filter((item) => item.video_id !== targetId));
       showToast("已刪除保存紀錄");
     } catch (err) {
@@ -617,6 +701,42 @@ export default function HomePage() {
         )}
       </header>
 
+      {/* Backend offline banner */}
+      {backendStatus === "offline" && (
+        <div className="max-w-[1600px] w-full mx-auto px-4 pt-4">
+          <div className="p-3.5 rounded-xl border border-amber-500/40 bg-amber-500/10 text-[var(--accent-amber)] text-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <WifiOff className="w-4 h-4 mt-0.5 shrink-0" />
+              <div className="space-y-0.5 leading-relaxed">
+                <div className="font-semibold">
+                  本機後端服務尚未啟動（離線模式）
+                </div>
+                <p className="text-[var(--text-muted)]">
+                  你的歷史紀錄仍安全保存在本機硬碟。請先啟動{" "}
+                  <code className="px-1 py-0.5 rounded bg-[var(--bg-elevated)] text-[var(--text-main)]">
+                    {isMac ? "run_app.command" : "run_app.bat"}
+                  </code>
+                  （或執行{" "}
+                  <code className="px-1 py-0.5 rounded bg-[var(--bg-elevated)] text-[var(--text-main)]">
+                    {isMac ? "install_autostart.command" : "install_autostart.bat"}
+                  </code>{" "}
+                  設定背景常駐）；啟動後系統每 3 秒會自動重新連線並同步紀錄。
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => syncFromBackend({ announceReconnect: true })}
+              disabled={reconnecting}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-[var(--accent-amber)] font-medium cursor-pointer disabled:opacity-60 shrink-0 transition"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${reconnecting ? "animate-spin" : ""}`} />
+              立即重連
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Error banner */}
       {error && (
         <div className="max-w-[1600px] w-full mx-auto px-4 pt-4">
@@ -797,6 +917,11 @@ export default function HomePage() {
               <h2 className="text-sm font-semibold flex items-center gap-2">
                 <Clock className="w-4 h-4 text-[var(--accent-blue)]" />
                 已保存的知識解析檔（{historyItems.length}）
+                {backendStatus === "offline" && historyItems.length > 0 && (
+                  <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/35 text-[var(--accent-amber)]">
+                    離線快取（唯讀）
+                  </span>
+                )}
               </h2>
               <span className="text-xs text-[var(--text-muted)]">
                 分析結果會自動保存於本機，點擊即可秒開，不用重新解析
@@ -805,7 +930,11 @@ export default function HomePage() {
 
             {historyItems.length === 0 ? (
               <div className="p-8 rounded-2xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-card)] text-center text-xs text-[var(--text-muted)]">
-                目前還沒有保存的解析檔。貼上 YouTube 網址並點擊「解析觀念」後，結果就會自動保存在這裡！
+                {backendStatus === "offline"
+                  ? `目前本機後端未啟動，且此瀏覽器尚未快取歷史清單。請先啟動本機後端服務（${
+                      isMac ? "run_app.command" : "run_app.bat"
+                    }），連線後將自動顯示你所有保存的紀錄。`
+                  : "目前還沒有保存的解析檔。貼上 YouTube 網址並點擊「解析觀念」後，結果就會自動保存在這裡！"}
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

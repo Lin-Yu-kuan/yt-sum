@@ -80,26 +80,73 @@ try {
     $FrontendOutStage = Join-Path $StagingDir "frontend\out"
     Copy-FilteredDirectory -Source $FrontendOut -Destination $FrontendOutStage -ExcludeNames @(".DS_Store")
 
-    foreach ($rootFile in @("run_app.command", "run_app.bat", "README.md")) {
+    foreach ($rootFile in @(
+        "run_app.command",
+        "install_autostart.command",
+        "uninstall_autostart.command",
+        "run_app.bat",
+        "install_autostart.bat",
+        "uninstall_autostart.bat",
+        "install_autostart.ps1",
+        "uninstall_autostart.ps1",
+        "README.md"
+    )) {
         $srcFile = Join-Path $RootDir $rootFile
         if (Test-Path $srcFile) {
             Copy-Item -Path $srcFile -Destination (Join-Path $StagingDir $rootFile) -Force
         }
     }
 
-    # 確保打包進去的 run_app.command 為純 LF 換行
-    $cmdStage = Join-Path $StagingDir "run_app.command"
-    if (Test-Path $cmdStage) {
-        $raw = [System.IO.File]::ReadAllText($cmdStage, [System.Text.UTF8Encoding]::new($false))
+    # 確保打包進去的所有 *.command 皆為純 LF 換行
+    foreach ($cmdFile in Get-ChildItem -Path $StagingDir -Filter "*.command") {
+        $raw = [System.IO.File]::ReadAllText($cmdFile.FullName, [System.Text.UTF8Encoding]::new($false))
         $lf = $raw.Replace("`r`n", "`n")
-        [System.IO.File]::WriteAllText($cmdStage, $lf, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($cmdFile.FullName, $lf, [System.Text.UTF8Encoding]::new($false))
     }
 
     Write-Host "[3/3] 壓縮產出 $ZipPath ..." -ForegroundColor Cyan
     if (Test-Path $ZipPath) {
         Remove-Item $ZipPath -Force
     }
-    Compress-Archive -Path (Join-Path $StagingDir "*") -DestinationPath $ZipPath -Force
+
+    $PythonZipper = $null
+    $VenvPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
+    if (Test-Path $VenvPython) {
+        $PythonZipper = $VenvPython
+    } else {
+        $SysPy = Get-Command python -ErrorAction SilentlyContinue
+        if ($SysPy) { $PythonZipper = $SysPy.Source }
+    }
+
+    if ($PythonZipper) {
+        @'
+import sys, time, zipfile
+from pathlib import Path
+
+stage = Path(sys.argv[1])
+zip_path = Path(sys.argv[2])
+
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for file_path in sorted(stage.rglob("*")):
+        if not file_path.is_file():
+            continue
+        rel = file_path.relative_to(stage).as_posix()
+        st = file_path.stat()
+        mtime = time.localtime(st.st_mtime)
+        date_time = mtime[:6] if mtime.tm_year >= 1980 else (1980, 1, 1, 0, 0, 0)
+        zi = zipfile.ZipInfo(filename=rel, date_time=date_time)
+        zi.create_system = 3
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        mode = 0o100755 if file_path.suffix == ".command" else 0o100644
+        zi.external_attr = mode << 16
+        zf.writestr(zi, file_path.read_bytes())
+'@ | & $PythonZipper - $StagingDir $ZipPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Python zipfile 壓縮失敗。"
+        }
+    } else {
+        Compress-Archive -Path (Join-Path $StagingDir "*") -DestinationPath $ZipPath -Force
+    }
 
     $zipInfo = Get-Item $ZipPath
     $sizeMb = [Math]::Round($zipInfo.Length / 1MB, 2)
