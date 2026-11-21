@@ -187,21 +187,33 @@ def download_video_or_audio(req: DownloadRequest):
     )
 
 
-def _spawn_download_thread(task_id: str) -> None:
+def _spawn_download_thread(task_id: str, generation: int) -> None:
     def _run():
         task = DOWNLOAD_TASKS[task_id]
+        lock: threading.Lock = task["lock"]
 
         def _update(pct: int, stage: str):
-            # 暫停或終止後不再覆寫百分比
-            if task["control"] == "run":
-                task["percent"] = max(task["percent"], pct)
-                task["stage"] = stage
+            with lock:
+                # 暫停、終止或世代已切換後不再覆寫進度
+                if task["generation"] == generation and task["control"] == "run":
+                    task["percent"] = max(task["percent"], pct)
+                    task["stage"] = stage
 
         def _control():
-            return task["control"]
+            with lock:
+                if task["generation"] != generation:
+                    return "cancel"
+                return task["control"]
 
         def _set_proc(proc):
-            task["proc"] = proc
+            should_kill = False
+            with lock:
+                if task["generation"] == generation and task["control"] == "run":
+                    task["proc"] = proc
+                else:
+                    should_kill = True
+            if should_kill:
+                terminate_process_tree(proc)
 
         try:
             file_path = download_media(
@@ -212,21 +224,37 @@ def _spawn_download_thread(task_id: str) -> None:
                 control_check=_control,
                 process_callback=_set_proc,
             )
-            task["status"] = "done"
-            task["percent"] = 100
-            task["stage"] = "處理完成，正在儲存檔案..."
-            task["filename"] = file_path.name
-            task["file_path"] = str(file_path)
+            with lock:
+                if task["generation"] == generation and task["control"] == "run":
+                    task["status"] = "done"
+                    task["percent"] = 100
+                    task["stage"] = "處理完成，正在儲存檔案..."
+                    task["filename"] = file_path.name
+                    task["file_path"] = str(file_path)
         except DownloadPausedError:
-            task["status"] = "paused"
-            task["stage"] = f"已暫停於 {task['percent']}%（可點繼續接續下載）"
+            with lock:
+                if task["generation"] == generation and task["control"] == "pause":
+                    task["status"] = "paused"
+                    task["stage"] = f"已暫停於 {task['percent']}%（可點繼續接續下載）"
         except DownloadCancelledError:
-            task["status"] = "cancelled"
-            task["stage"] = "已終止下載"
-            cleanup_partial_files(DOWNLOADS_DIR, task["video_id"])
+            should_cleanup = False
+            with lock:
+                if task["generation"] == generation or task["status"] == "cancelled":
+                    if task["generation"] == generation:
+                        task["status"] = "cancelled"
+                        task["stage"] = "已終止下載"
+                    should_cleanup = task["status"] == "cancelled"
+            if should_cleanup:
+                cleanup_partial_files(DOWNLOADS_DIR, task["video_id"])
         except Exception as exc:
-            task["status"] = "error"
-            task["error"] = str(exc)
+            with lock:
+                if task["generation"] == generation and task["control"] == "run":
+                    task["status"] = "error"
+                    task["error"] = str(exc)
+        finally:
+            with lock:
+                if task["generation"] == generation:
+                    task["proc"] = None
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -247,6 +275,9 @@ def start_media_download(req: DownloadRequest):
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
     task_id = uuid.uuid4().hex
     DOWNLOAD_TASKS[task_id] = {
+        "lock": threading.Lock(),
+        "generation": 0,
+        "proc": None,
         "status": "running",
         "control": "run",
         "percent": 0,
@@ -258,7 +289,7 @@ def start_media_download(req: DownloadRequest):
         "video_id": video_id,
         "error": None,
     }
-    _spawn_download_thread(task_id)
+    _spawn_download_thread(task_id, 0)
     return {"task_id": task_id}
 
 
@@ -267,10 +298,15 @@ def pause_media_download(task_id: str):
     task = DOWNLOAD_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="找不到下載任務")
-    task["control"] = "pause"
-    task["status"] = "paused"
-    task["stage"] = f"已暫停於 {task['percent']}%（可點繼續接續下載）"
-    terminate_process_tree(task.get("proc"))
+    with task["lock"]:
+        if task["status"] in {"done", "cancelled", "error"}:
+            return {"status": task["status"]}
+        task["control"] = "pause"
+        task["status"] = "paused"
+        task["stage"] = f"已暫停於 {task['percent']}%（可點繼續接續下載）"
+        proc = task.get("proc")
+        task["proc"] = None
+    terminate_process_tree(proc)
     return {"status": "paused"}
 
 
@@ -279,12 +315,20 @@ def resume_media_download(task_id: str):
     task = DOWNLOAD_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="找不到下載任務")
-    if task["status"] == "done":
-        return {"status": "done"}
-    task["control"] = "run"
-    task["status"] = "running"
-    task["stage"] = f"從 {task['percent']}% 繼續下載中..."
-    _spawn_download_thread(task_id)
+    with task["lock"]:
+        if task["status"] == "done":
+            return {"status": "done"}
+        if task["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="下載已終止，無法繼續")
+        if task["status"] == "running" and task["control"] == "run":
+            return {"status": "running"}
+        task["generation"] += 1
+        generation = task["generation"]
+        task["control"] = "run"
+        task["status"] = "running"
+        task["error"] = None
+        task["stage"] = f"從 {task['percent']}% 繼續下載中..."
+    _spawn_download_thread(task_id, generation)
     return {"status": "running"}
 
 
@@ -293,11 +337,16 @@ def cancel_media_download(task_id: str):
     task = DOWNLOAD_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="找不到下載任務")
-    task["control"] = "cancel"
-    task["status"] = "cancelled"
-    task["stage"] = "已終止下載"
-    terminate_process_tree(task.get("proc"))
-    cleanup_partial_files(DOWNLOADS_DIR, task["video_id"])
+    with task["lock"]:
+        task["generation"] += 1
+        task["control"] = "cancel"
+        task["status"] = "cancelled"
+        task["stage"] = "已終止下載"
+        proc = task.get("proc")
+        task["proc"] = None
+        video_id = task["video_id"]
+    terminate_process_tree(proc)
+    cleanup_partial_files(DOWNLOADS_DIR, video_id)
     return {"status": "cancelled"}
 
 

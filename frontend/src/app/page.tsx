@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Clock,
@@ -84,6 +84,8 @@ export default function HomePage() {
     isPaused: boolean;
     canControl: boolean;
   } | null>(null);
+  const quickAbortRef = useRef<AbortController | null>(null);
+  const quickPausedIntentRef = useRef(false);
   const [pendingDelete, setPendingDelete] = useState<HistorySummaryItem | null>(null);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
 
@@ -262,6 +264,11 @@ export default function HomePage() {
       setShowInstallGuide(true);
       return;
     }
+    quickAbortRef.current?.abort();
+    const controller = new AbortController();
+    quickAbortRef.current = controller;
+    quickPausedIntentRef.current = false;
+
     setQuickDownloading(fmt);
     setQuickTaskId(null);
     setError(null);
@@ -277,6 +284,9 @@ export default function HomePage() {
         targetUrl,
         fmt,
         (percent, stage, isPaused) => {
+          if (controller.signal.aborted) return;
+          // 暫停請求剛送出時，忽略尚未反映暫停的過期輪詢回應
+          if (quickPausedIntentRef.current && !isPaused) return;
           setQuickProgress({
             label: fmt === "mp3" ? "正在下載並轉檔 MP3" : "正在下載 MP4 影片",
             percent,
@@ -285,13 +295,20 @@ export default function HomePage() {
             canControl: true,
           });
         },
-        (taskId) => setQuickTaskId(taskId)
+        (taskId) => {
+          if (!controller.signal.aborted) {
+            setQuickTaskId(taskId);
+          }
+        },
+        controller.signal
       );
       triggerBlobDownload(blob, filename);
       showToast(`已完成下載：${filename}`);
     } catch (err) {
       if (err instanceof DownloadCancelledByUser) {
-        showToast("已終止下載");
+        if (quickAbortRef.current === controller) {
+          showToast("已終止下載");
+        }
       } else {
         const msg = err instanceof Error ? err.message : "下載失敗";
         if (msg.toLowerCase().includes("ffmpeg")) {
@@ -301,9 +318,13 @@ export default function HomePage() {
         }
       }
     } finally {
-      setQuickDownloading(null);
-      setQuickTaskId(null);
-      setQuickProgress(null);
+      if (quickAbortRef.current === controller) {
+        quickAbortRef.current = null;
+        quickPausedIntentRef.current = false;
+        setQuickDownloading(null);
+        setQuickTaskId(null);
+        setQuickProgress(null);
+      }
     }
   };
 
@@ -705,21 +726,39 @@ export default function HomePage() {
                 canControl={quickProgress.canControl && quickTaskId !== null}
                 onPause={async () => {
                   if (!quickTaskId) return;
+                  quickPausedIntentRef.current = true;
                   setQuickProgress((p) => (p ? { ...p, isPaused: true, stage: "已暫停下載" } : p));
-                  await pauseMediaDownload(quickTaskId);
+                  try {
+                    await pauseMediaDownload(quickTaskId);
+                  } catch (err) {
+                    quickPausedIntentRef.current = false;
+                    showToast(err instanceof Error ? err.message : "暫停下載失敗");
+                  }
                 }}
                 onResume={async () => {
                   if (!quickTaskId) return;
+                  quickPausedIntentRef.current = false;
                   setQuickProgress((p) => (p ? { ...p, isPaused: false, stage: "繼續下載中..." } : p));
-                  await resumeMediaDownload(quickTaskId);
+                  try {
+                    await resumeMediaDownload(quickTaskId);
+                  } catch (err) {
+                    showToast(err instanceof Error ? err.message : "繼續下載失敗");
+                  }
                 }}
                 onCancel={async () => {
                   if (!quickTaskId) return;
                   const id = quickTaskId;
+                  quickAbortRef.current?.abort();
+                  quickAbortRef.current = null;
+                  quickPausedIntentRef.current = false;
                   setQuickProgress(null);
                   setQuickDownloading(null);
                   setQuickTaskId(null);
-                  await cancelMediaDownload(id);
+                  try {
+                    await cancelMediaDownload(id);
+                  } catch {
+                    // ignore cancel error if task already ended
+                  }
                   showToast("已終止下載");
                 }}
               />

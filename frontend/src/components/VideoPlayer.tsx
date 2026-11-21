@@ -86,6 +86,14 @@ export default function VideoPlayer({
     canControl: boolean;
   } | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const downloadAbortRef = useRef<AbortController | null>(null);
+  const pausedIntentRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      downloadAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -233,6 +241,11 @@ export default function VideoPlayer({
       onOpenInstallGuide();
       return;
     }
+    downloadAbortRef.current?.abort();
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    pausedIntentRef.current = false;
+
     setDownloadingFmt(fmt);
     setActiveTaskId(null);
     setDlProgress({
@@ -248,6 +261,9 @@ export default function VideoPlayer({
         url,
         fmt,
         (percent, stage, isPaused) => {
+          if (controller.signal.aborted) return;
+          // 暫停請求剛送出時，忽略尚未反映暫停的過期輪詢回應
+          if (pausedIntentRef.current && !isPaused) return;
           setDlProgress({
             label: fmt === "mp3" ? "正在下載並轉檔 MP3" : "正在下載 MP4 影片",
             percent,
@@ -256,7 +272,12 @@ export default function VideoPlayer({
             canControl: true,
           });
         },
-        (taskId) => setActiveTaskId(taskId)
+        (taskId) => {
+          if (!controller.signal.aborted) {
+            setActiveTaskId(taskId);
+          }
+        },
+        controller.signal
       );
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -269,16 +290,22 @@ export default function VideoPlayer({
       onNotify(`已完成下載：${filename}`);
     } catch (err) {
       if (err instanceof DownloadCancelledByUser) {
-        onNotify("已終止下載");
+        if (downloadAbortRef.current === controller) {
+          onNotify("已終止下載");
+        }
       } else {
         const msg = err instanceof Error ? err.message : "下載失敗";
         if (msg.toLowerCase().includes("ffmpeg")) onOpenInstallGuide();
         else onNotify(msg);
       }
     } finally {
-      setDownloadingFmt(null);
-      setActiveTaskId(null);
-      setDlProgress(null);
+      if (downloadAbortRef.current === controller) {
+        downloadAbortRef.current = null;
+        pausedIntentRef.current = false;
+        setDownloadingFmt(null);
+        setActiveTaskId(null);
+        setDlProgress(null);
+      }
     }
   };
 
@@ -466,21 +493,39 @@ export default function VideoPlayer({
             canControl={dlProgress.canControl && activeTaskId !== null}
             onPause={async () => {
               if (!activeTaskId) return;
+              pausedIntentRef.current = true;
               setDlProgress((p) => (p ? { ...p, isPaused: true, stage: "已暫停下載" } : p));
-              await pauseMediaDownload(activeTaskId);
+              try {
+                await pauseMediaDownload(activeTaskId);
+              } catch (err) {
+                pausedIntentRef.current = false;
+                onNotify(err instanceof Error ? err.message : "暫停下載失敗");
+              }
             }}
             onResume={async () => {
               if (!activeTaskId) return;
+              pausedIntentRef.current = false;
               setDlProgress((p) => (p ? { ...p, isPaused: false, stage: "繼續下載中..." } : p));
-              await resumeMediaDownload(activeTaskId);
+              try {
+                await resumeMediaDownload(activeTaskId);
+              } catch (err) {
+                onNotify(err instanceof Error ? err.message : "繼續下載失敗");
+              }
             }}
             onCancel={async () => {
               if (!activeTaskId) return;
               const id = activeTaskId;
+              downloadAbortRef.current?.abort();
+              downloadAbortRef.current = null;
+              pausedIntentRef.current = false;
               setDlProgress(null);
               setDownloadingFmt(null);
               setActiveTaskId(null);
-              await cancelMediaDownload(id);
+              try {
+                await cancelMediaDownload(id);
+              } catch {
+                // ignore cancel error if task already ended
+              }
               onNotify("已終止下載");
             }}
           />

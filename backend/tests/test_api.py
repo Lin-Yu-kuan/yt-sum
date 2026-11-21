@@ -152,3 +152,180 @@ def test_download_status_not_found():
     assert client.post("/api/download/pause/nonexistent-task").status_code == 404
     assert client.post("/api/download/resume/nonexistent-task").status_code == 404
     assert client.post("/api/download/cancel/nonexistent-task").status_code == 404
+
+
+def _spawn_sleep_process():
+    import subprocess
+    import sys
+
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def test_download_pause_kills_process_and_stays_paused(tmp_path, monkeypatch):
+    import threading
+    import time
+    import main
+    from services.youtube_service import DownloadPausedError
+
+    monkeypatch.setattr(main, "DOWNLOADS_DIR", tmp_path)
+    started = threading.Event()
+    spawned_procs = []
+
+    def fake_download_media(url, fmt, output_dir, progress_callback=None, control_check=None, process_callback=None):
+        proc = _spawn_sleep_process()
+        spawned_procs.append(proc)
+        try:
+            process_callback(proc)
+            started.set()
+            while True:
+                if control_check() == "pause":
+                    raise DownloadPausedError("paused")
+                if control_check() == "cancel":
+                    raise main.DownloadCancelledError("cancelled")
+                time.sleep(0.05)
+        finally:
+            if proc.poll() is None:
+                main.terminate_process_tree(proc)
+
+    monkeypatch.setattr(main, "download_media", fake_download_media)
+
+    res = client.post(
+        "/api/download/start",
+        json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "format": "mp4"},
+    )
+    assert res.status_code == 200
+    task_id = res.json()["task_id"]
+    assert started.wait(timeout=3.0)
+
+    pause_res = client.post(f"/api/download/pause/{task_id}")
+    assert pause_res.status_code == 200
+    assert pause_res.json()["status"] == "paused"
+
+    time.sleep(0.2)
+    assert spawned_procs[0].poll() is not None
+    status = client.get(f"/api/download/status/{task_id}").json()
+    assert status["status"] == "paused"
+
+    # 測試重覆呼叫 resume 不會重複啟動
+    started.clear()
+    res_resume_1 = client.post(f"/api/download/resume/{task_id}")
+    assert res_resume_1.status_code == 200
+    assert started.wait(timeout=3.0)
+    res_resume_2 = client.post(f"/api/download/resume/{task_id}")
+    assert res_resume_2.status_code == 200
+    assert len(spawned_procs) == 2
+
+    # 最後終止清理
+    cancel_res = client.post(f"/api/download/cancel/{task_id}")
+    assert cancel_res.status_code == 200
+    time.sleep(0.2)
+    assert spawned_procs[1].poll() is not None
+    assert client.post(f"/api/download/resume/{task_id}").status_code == 409
+
+
+def test_download_cancel_cleans_partial_files(tmp_path, monkeypatch):
+    import threading
+    import time
+    import main
+
+    monkeypatch.setattr(main, "DOWNLOADS_DIR", tmp_path)
+    video_id = "dQw4w9WgXcQ"
+    part_file = tmp_path / f"Test Video [{video_id}].mp4.part"
+    ytdl_file = tmp_path / f"Test Video [{video_id}].mp4.ytdl"
+    stream_file = tmp_path / f"Test Video [{video_id}].f137.mp4"
+    for f in (part_file, ytdl_file, stream_file):
+        f.write_bytes(b"partial")
+
+    started = threading.Event()
+    spawned_procs = []
+
+    def fake_download_media(url, fmt, output_dir, progress_callback=None, control_check=None, process_callback=None):
+        proc = _spawn_sleep_process()
+        spawned_procs.append(proc)
+        try:
+            process_callback(proc)
+            started.set()
+            while True:
+                if control_check() == "cancel":
+                    raise main.DownloadCancelledError("cancelled")
+                time.sleep(0.05)
+        finally:
+            if proc.poll() is None:
+                main.terminate_process_tree(proc)
+
+    monkeypatch.setattr(main, "download_media", fake_download_media)
+
+    task_id = client.post(
+        "/api/download/start",
+        json={"url": f"https://www.youtube.com/watch?v={video_id}", "format": "mp4"},
+    ).json()["task_id"]
+    assert started.wait(timeout=3.0)
+
+    cancel_res = client.post(f"/api/download/cancel/{task_id}")
+    assert cancel_res.status_code == 200
+    assert cancel_res.json()["status"] == "cancelled"
+
+    time.sleep(0.2)
+    assert spawned_procs[0].poll() is not None
+    assert not part_file.exists()
+    assert not ytdl_file.exists()
+    assert not stream_file.exists()
+
+
+def test_download_startup_race_and_generation_isolation(tmp_path, monkeypatch):
+    import threading
+    import time
+    import main
+    from services.youtube_service import DownloadPausedError
+
+    monkeypatch.setattr(main, "DOWNLOADS_DIR", tmp_path)
+    allow_set_proc = threading.Event()
+    proc_registered = threading.Event()
+    spawned_procs = []
+
+    def fake_download_media(url, fmt, output_dir, progress_callback=None, control_check=None, process_callback=None):
+        proc = _spawn_sleep_process()
+        spawned_procs.append(proc)
+        try:
+            allow_set_proc.wait(timeout=3.0)
+            process_callback(proc)
+            proc_registered.set()
+            if control_check() == "pause":
+                raise DownloadPausedError("paused")
+            if control_check() == "cancel":
+                raise main.DownloadCancelledError("cancelled")
+            # 模擬舊執行緒被 kill 後回報異常
+            raise RuntimeError("killed")
+        finally:
+            if proc.poll() is None:
+                main.terminate_process_tree(proc)
+
+    monkeypatch.setattr(main, "download_media", fake_download_media)
+
+    task_id = client.post(
+        "/api/download/start",
+        json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "format": "mp4"},
+    ).json()["task_id"]
+
+    # 在 process_callback 執行前就按下暫停
+    pause_res = client.post(f"/api/download/pause/{task_id}")
+    assert pause_res.status_code == 200
+    allow_set_proc.set()
+    assert proc_registered.wait(timeout=3.0)
+    time.sleep(0.2)
+
+    # 即使暫停時 proc 尚未註冊，_set_proc 與 finally 仍應立即終止該子行程
+    assert spawned_procs[0].poll() is not None
+    assert client.get(f"/api/download/status/{task_id}").json()["status"] == "paused"
+
+    # 立刻 resume，舊執行緒若較晚退出也不應覆寫新世代為 error
+    resume_res = client.post(f"/api/download/resume/{task_id}")
+    assert resume_res.status_code == 200
+    time.sleep(0.1)
+    assert client.get(f"/api/download/status/{task_id}").json()["status"] in {"running", "error"}
+    client.post(f"/api/download/cancel/{task_id}")

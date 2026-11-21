@@ -209,28 +209,50 @@ def extract_audio_for_gemini(url: str, temp_dir: Path) -> Path:
 
 
 def cleanup_partial_files(output_dir: Path, video_id: str) -> None:
-    """終止下載時清理殘留的 .part / 暫存檔"""
+    """終止下載時清理殘留的 .part / .ytdl / 分離串流暫存檔"""
     if not output_dir.exists():
         return
-    for p in output_dir.glob(f"*[{video_id}]*.part*"):
-        try:
-            p.unlink()
-        except Exception:
-            pass
+    id_marker = f"[{video_id}]"
+    patterns = (
+        f"*{id_marker}*.part*",
+        f"*{id_marker}*.ytdl",
+        f"*{id_marker}*.temp.*",
+    )
+    for pattern in patterns:
+        for p in output_dir.glob(pattern):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    # yt-dlp 尚未合併的分離串流檔（例如 title [id].f137.mp4 / .f140.m4a / .f251.webm）
+    stream_re = re.compile(r"\.f\d+\.[^.]+$", re.IGNORECASE)
+    for p in output_dir.glob(f"*{id_marker}*"):
+        if p.is_file() and stream_re.search(p.name):
+            try:
+                p.unlink()
+            except Exception:
+                pass
 
 
-def terminate_process_tree(proc: subprocess.Popen | None) -> None:
-    """立即終止 yt-dlp 及其子行程 (ffmpeg)"""
-    if proc is None or proc.poll() is not None:
+def terminate_process_tree(
+    proc: subprocess.Popen | None,
+    wait_timeout: float = 3.0,
+) -> None:
+    """立即終止 yt-dlp 及其子行程 (ffmpeg) 並等待釋放檔案控制代碼"""
+    if proc is None:
+        return
+    if proc.poll() is not None:
         return
     try:
         if os.name == "nt":
-            subprocess.run(
+            res = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
+            if res.returncode != 0 and proc.poll() is None:
+                proc.kill()
         else:
             proc.terminate()
     except Exception:
@@ -238,6 +260,17 @@ def terminate_process_tree(proc: subprocess.Popen | None) -> None:
             proc.kill()
         except Exception:
             pass
+
+    try:
+        proc.wait(timeout=wait_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def download_media(
@@ -276,6 +309,7 @@ def download_media(
 
     cmd = [
         sys.executable,
+        "-u",
         "-m",
         "yt_dlp",
         "--newline",
@@ -296,6 +330,7 @@ def download_media(
         cmd.extend(["-f", fmt_selector, "--merge-output-format", "mp4"])
     cmd.append(url)
 
+    proc_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -303,45 +338,57 @@ def download_media(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=proc_env,
     )
-    if process_callback:
-        process_callback(proc)
 
     pct_re = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%(?:.*?at\s+([^\s]+))?")
     last_lines: list[str] = []
 
-    if proc.stdout:
-        for raw_line in proc.stdout:
-            _check_control()
-            line = raw_line.strip()
-            if not line:
-                continue
-            last_lines.append(line)
-            if len(last_lines) > 8:
-                last_lines.pop(0)
+    try:
+        if process_callback:
+            process_callback(proc)
+        _check_control()
 
-            m = pct_re.search(line)
-            if m and progress_callback:
-                pct = float(m.group(1))
-                speed = m.group(2)
-                speed_str = f" · {speed}" if speed else ""
-                progress_callback(
-                    min(95, max(1, int(pct))),
-                    f"下載串流中 {pct:.1f}%{speed_str}",
-                )
-            elif (
-                "[Merger]" in line
-                or "[ExtractAudio]" in line
-                or "[ffmpeg]" in line
-            ) and progress_callback:
-                progress_callback(97, "FFmpeg 合併／轉檔中...")
+        if proc.stdout:
+            for raw_line in proc.stdout:
+                _check_control()
+                line = raw_line.strip()
+                if not line:
+                    continue
+                last_lines.append(line)
+                if len(last_lines) > 8:
+                    last_lines.pop(0)
 
-    returncode = proc.wait()
-    _check_control()
+                m = pct_re.search(line)
+                if m and progress_callback:
+                    pct = float(m.group(1))
+                    speed = m.group(2)
+                    speed_str = f" · {speed}" if speed else ""
+                    progress_callback(
+                        min(95, max(1, int(pct))),
+                        f"下載串流中 {pct:.1f}%{speed_str}",
+                    )
+                elif (
+                    "[Merger]" in line
+                    or "[ExtractAudio]" in line
+                    or "[ffmpeg]" in line
+                ) and progress_callback:
+                    progress_callback(97, "FFmpeg 合併／轉檔中...")
 
-    if returncode != 0:
-        detail = last_lines[-1] if last_lines else f"exit code {returncode}"
-        raise RuntimeError(f"下載失敗：{detail}")
+        returncode = proc.wait()
+        _check_control()
+
+        if returncode != 0:
+            detail = last_lines[-1] if last_lines else f"exit code {returncode}"
+            raise RuntimeError(f"下載失敗：{detail}")
+    finally:
+        if proc.stdout:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+        if proc.poll() is None:
+            terminate_process_tree(proc)
 
     matches = sorted(
         output_dir.glob(f"*[{video_id}]*{target_ext}"),
