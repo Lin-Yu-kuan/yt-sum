@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -10,6 +11,11 @@ from schemas import ChatMessage, GeminiKnowledgeOutput
 
 USER_CONFIG_DIR = Path.home() / ".yt-sum"
 USER_CONFIG_FILE = USER_CONFIG_DIR / "config.json"
+FALLBACK_MODELS = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+)
 
 
 LEVEL_INSTRUCTIONS = {
@@ -92,6 +98,55 @@ def _get_model_name() -> str:
     return os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
 
 
+def _candidate_models() -> list[str]:
+    """依優先順序建立不重複的候選模型清單"""
+    primary = _get_model_name()
+    ordered: list[str] = []
+    for name in (primary, *FALLBACK_MODELS):
+        if name and name not in ordered:
+            ordered.append(name)
+    return ordered
+
+
+def _is_transient_gemini_error(exc: Exception) -> bool:
+    """判斷是否為暫時性負載／限流錯誤（503 / 429 / 連線逾時）"""
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if status in {429, 500, 502, 503, 504}:
+        return True
+    msg = str(exc).upper()
+    return any(
+        token in msg
+        for token in ("503", "UNAVAILABLE", "HIGH DEMAND", "429", "RESOURCE_EXHAUSTED", "TIMED OUT")
+    )
+
+
+def _generate_with_fallback(
+    client: genai.Client,
+    contents: object,
+    config: types.GenerateContentConfig,
+):
+    """呼叫 Gemini API，遇到 503/429 等暫時性錯誤時自動切換備援模型"""
+    models = _candidate_models()
+    last_exc: Exception | None = None
+    for idx, model_name in enumerate(models):
+        try:
+            return client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            last_exc = exc
+            has_next = idx < len(models) - 1
+            if has_next and _is_transient_gemini_error(exc):
+                time.sleep(0.5)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("無法呼叫 Gemini 模型")
+
+
 def analyze_transcript_with_gemini(
     video_title: str,
     transcript_text: str,
@@ -100,7 +155,6 @@ def analyze_transcript_with_gemini(
 ) -> GeminiKnowledgeOutput:
     """使用逐字稿呼叫 Gemini 產出結構化三層知識"""
     client = _get_client(api_key_override)
-    model_name = _get_model_name()
 
     # 避免極長影片超出單次輸入建議上限，保留前 120,000 字元
     trimmed_transcript = transcript_text[:120_000]
@@ -110,8 +164,8 @@ def analyze_transcript_with_gemini(
         f"以下是影片逐字稿（含時間戳記）：\n{trimmed_transcript}"
     )
 
-    response = client.models.generate_content(
-        model=model_name,
+    response = _generate_with_fallback(
+        client=client,
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -126,6 +180,43 @@ def analyze_transcript_with_gemini(
     return GeminiKnowledgeOutput.model_validate_json(response.text)
 
 
+def analyze_youtube_url_with_gemini(
+    video_title: str,
+    youtube_url: str,
+    level: Literal["beginner", "intermediate", "advanced"],
+    api_key_override: str | None = None,
+) -> GeminiKnowledgeOutput:
+    """當無法抓取字幕或本機 IP 受限時，直接將公開 YouTube 網址交由 Gemini 多模態解析"""
+    client = _get_client(api_key_override)
+
+    prompt = (
+        f"影片標題：{video_title}\n"
+        f"學習者背景設定：{LEVEL_INSTRUCTIONS[level]}\n"
+        "無法取得此影片的文字逐字稿（可能無字幕或本機受限），"
+        "請直接觀看與聆聽這支 YouTube 影片的視訊與音訊內容，推估對應的時間點（`[mm:ss]` 與 `seconds`），"
+        "並嚴格按照系統指令產出三層知識結構。"
+    )
+    contents = types.Content(
+        parts=[
+            types.Part(file_data=types.FileData(file_uri=youtube_url)),
+            types.Part.from_text(text=prompt),
+        ]
+    )
+    response = _generate_with_fallback(
+        client=client,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=GeminiKnowledgeOutput,
+            temperature=0.3,
+        ),
+    )
+    if response.parsed is not None:
+        return response.parsed
+    return GeminiKnowledgeOutput.model_validate_json(response.text)
+
+
 def analyze_audio_with_gemini(
     video_title: str,
     audio_path: Path,
@@ -134,7 +225,6 @@ def analyze_audio_with_gemini(
 ) -> GeminiKnowledgeOutput:
     """無字幕備援：上傳音訊檔給 Gemini 進行多模態分析"""
     client = _get_client(api_key_override)
-    model_name = _get_model_name()
 
     uploaded = client.files.upload(file=str(audio_path))
     try:
@@ -144,8 +234,8 @@ def analyze_audio_with_gemini(
             "這部影片沒有提供文字字幕，請直接聆聽音訊內容，推估對應的時間點（秒數），"
             "並嚴格按照系統指令產出三層知識結構。"
         )
-        response = client.models.generate_content(
-            model=model_name,
+        response = _generate_with_fallback(
+            client=client,
             contents=[uploaded, prompt],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
@@ -173,7 +263,6 @@ def chat_follow_up(
 ) -> str:
     """處理 APP 內建深入追問對話"""
     client = _get_client(api_key_override)
-    model_name = _get_model_name()
 
     system = (
         "你是一位親切且專業的學習導師，請使用台灣繁體中文回答使用者針對這部影片觀念的深入提問。"
@@ -188,8 +277,8 @@ def chat_follow_up(
         contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg.content)]))
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=question)]))
 
-    response = client.models.generate_content(
-        model=model_name,
+    response = _generate_with_fallback(
+        client=client,
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -205,7 +294,6 @@ def translate_transcript_to_zh_tw(
 ) -> str:
     """將逐字稿（保留時間戳記或 SRT 編號）翻譯／轉換為台灣繁體中文"""
     client = _get_client(api_key_override)
-    model_name = _get_model_name()
 
     prompt = (
         "請將以下 YouTube 影片逐字稿完整翻譯並轉換為【台灣繁體中文】（使用台灣慣用詞彙，例如：伺服器、網域、軟體、影片）。\n"
@@ -215,8 +303,8 @@ def translate_transcript_to_zh_tw(
         f"{transcript_text[:120_000]}"
     )
 
-    response = client.models.generate_content(
-        model=model_name,
+    response = _generate_with_fallback(
+        client=client,
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.2),
     )

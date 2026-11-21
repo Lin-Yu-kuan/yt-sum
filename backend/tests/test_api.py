@@ -329,3 +329,131 @@ def test_download_startup_race_and_generation_isolation(tmp_path, monkeypatch):
     time.sleep(0.1)
     assert client.get(f"/api/download/status/{task_id}").json()["status"] in {"running", "error"}
     client.post(f"/api/download/cancel/{task_id}")
+
+
+def test_strip_ansi_and_format_ytdlp_error():
+    from services.youtube_service import format_ytdlp_error, strip_ansi
+
+    raw = "\x1b[0;31mERROR:\x1b[0m [youtube] 1IWTM9wFc5E: Sign in to confirm you’re not a bot."
+    assert strip_ansi(raw) == "ERROR: [youtube] 1IWTM9wFc5E: Sign in to confirm you’re not a bot."
+    friendly = format_ytdlp_error(raw)
+    assert "反機器人驗證" in friendly
+    assert "\x1b" not in friendly
+
+
+def test_resolve_ytdlp_cookie_source_priority(tmp_path, monkeypatch):
+    from services import youtube_service
+
+    env_cookie = tmp_path / "env_cookies.txt"
+    env_cookie.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    default_cookie = tmp_path / "default_cookies.txt"
+    default_cookie.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    monkeypatch.setattr(youtube_service, "DEFAULT_COOKIES_PATHS", (default_cookie,))
+    monkeypatch.setenv("YOUTUBE_COOKIES_FILE", str(env_cookie))
+    monkeypatch.delenv("YOUTUBE_COOKIES_FROM_BROWSER", raising=False)
+    assert youtube_service.resolve_ytdlp_cookie_source() == ("file", str(env_cookie))
+
+    monkeypatch.delenv("YOUTUBE_COOKIES_FILE", raising=False)
+    assert youtube_service.resolve_ytdlp_cookie_source() == ("file", str(default_cookie))
+
+    default_cookie.unlink()
+    monkeypatch.setenv("YOUTUBE_COOKIES_FROM_BROWSER", "chrome")
+    assert youtube_service.resolve_ytdlp_cookie_source() == ("browser", "chrome")
+
+
+def test_get_video_metadata_falls_back_to_oembed(monkeypatch):
+    from services import youtube_service
+
+    class BrokenYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            raise RuntimeError("bot check")
+
+    monkeypatch.setattr(youtube_service.yt_dlp, "YoutubeDL", BrokenYDL)
+    monkeypatch.setattr(
+        youtube_service,
+        "_fetch_oembed_metadata",
+        lambda url: ("測試影片標題", "測試頻道"),
+    )
+
+    meta = youtube_service.get_video_metadata("https://www.youtube.com/watch?v=1IWTM9wFc5E", "1IWTM9wFc5E")
+    assert meta.title == "測試影片標題"
+    assert meta.channel == "測試頻道"
+
+
+def test_analyze_falls_back_to_gemini_youtube_url_when_transcript_unavailable(monkeypatch):
+    import main
+    from services.youtube_service import VideoMetadata
+
+    sample = GeminiKnowledgeOutput(
+        video_summary_one_liner="Gemini 直接解析 YouTube 影片摘要。",
+        prerequisites=[],
+        core_concepts=[],
+        extensions=[],
+        graph_edges=[],
+    )
+
+    monkeypatch.setattr(
+        main,
+        "get_video_metadata",
+        lambda url, vid: VideoMetadata(
+            video_id=vid,
+            title="Windows Server 2025",
+            channel="詹姆斯的技術世界",
+            duration_seconds=0,
+        ),
+    )
+    monkeypatch.setattr(main, "get_transcript", lambda vid: None)
+    monkeypatch.setattr(
+        main,
+        "analyze_youtube_url_with_gemini",
+        lambda **kwargs: sample,
+    )
+    monkeypatch.setattr(
+        main,
+        "extract_audio_for_gemini",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不應觸發 yt-dlp 音訊下載")),
+    )
+    monkeypatch.setattr(main, "save_history", lambda data: None)
+
+    res = client.post(
+        "/api/analyze",
+        json={"url": "https://www.youtube.com/watch?v=1IWTM9wFc5E", "level": "intermediate"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["title"] == "Windows Server 2025"
+    assert body["transcript_source"] == "Gemini 直接解析 YouTube 影片"
+    assert body["video_summary_one_liner"] == "Gemini 直接解析 YouTube 影片摘要。"
+
+
+def test_gemini_fallback_on_503(monkeypatch):
+    calls = []
+
+    class FakeModels:
+        def generate_content(self, model, contents, config):
+            calls.append(model)
+            if len(calls) == 1:
+                raise RuntimeError("503 UNAVAILABLE. high demand")
+            return type("Resp", (), {"text": "ok", "parsed": None})()
+
+    fake_client = type("FakeClient", (), {"models": FakeModels()})()
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    monkeypatch.setattr(gemini_service.time, "sleep", lambda _: None)
+
+    resp = gemini_service._generate_with_fallback(
+        client=fake_client,
+        contents="hi",
+        config=gemini_service.types.GenerateContentConfig(temperature=0.2),
+    )
+    assert resp.text == "ok"
+    assert calls == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]

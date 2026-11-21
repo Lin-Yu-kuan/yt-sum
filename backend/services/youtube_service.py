@@ -1,19 +1,27 @@
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 
 
 PREFERRED_LANGS = ["zh-TW", "zh-Hant", "zh", "zh-Hans", "zh-CN", "en", "en-US", "ja"]
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_COOKIES_PATHS = (
+    BACKEND_ROOT / "cookies.txt",
+    Path.home() / ".yt-sum" / "cookies.txt",
+)
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 class DownloadPausedError(Exception):
@@ -43,6 +51,94 @@ class TranscriptResult:
 def has_ffmpeg() -> bool:
     """檢查系統是否已安裝 ffmpeg"""
     return shutil.which("ffmpeg") is not None
+
+
+def strip_ansi(text: str) -> str:
+    """移除終端機 ANSI 控制字元（例如 [0;31m）"""
+    return ANSI_ESCAPE_RE.sub("", text or "").strip()
+
+
+def format_ytdlp_error(raw_error: str) -> str:
+    """清理 yt-dlp 錯誤訊息並提供明確的繁體中文指引"""
+    cleaned = strip_ansi(raw_error)
+    lower = cleaned.lower()
+    if "sign in to confirm" in lower or "not a bot" in lower:
+        return (
+            "YouTube 觸發反機器人驗證（Sign in to confirm you're not a bot），"
+            "目前無法透過本機 IP 直接存取串流。建議先關閉 VPN 或稍後再試；"
+            "若需使用 MP4/MP3 下載功能，請將瀏覽器匯出的 cookies.txt 放置於 "
+            "`backend/cookies.txt`（或 `~/.yt-sum/cookies.txt`），"
+            "或在 `backend/.env` 設定 `YOUTUBE_COOKIES_FILE` / `YOUTUBE_COOKIES_FROM_BROWSER`。"
+        )
+    return cleaned or "yt-dlp 執行失敗"
+
+
+def resolve_ytdlp_cookie_source() -> tuple[str, str] | None:
+    """依序偵測環境變數與預設路徑中的 YouTube Cookies 設定"""
+    env_file = (os.getenv("YOUTUBE_COOKIES_FILE") or "").strip()
+    if env_file:
+        cookie_path = Path(env_file).expanduser()
+        if cookie_path.is_file():
+            return ("file", str(cookie_path))
+
+    for candidate in DEFAULT_COOKIES_PATHS:
+        if candidate.is_file():
+            return ("file", str(candidate))
+
+    browser = (os.getenv("YOUTUBE_COOKIES_FROM_BROWSER") or "").strip()
+    if browser:
+        return ("browser", browser)
+    return None
+
+
+def has_configured_cookies() -> bool:
+    """回報目前是否已偵測到可用的 YouTube Cookies 設定"""
+    return resolve_ytdlp_cookie_source() is not None
+
+
+def _apply_ytdlp_cookie_opts(ydl_opts: dict) -> dict:
+    """為 yt_dlp.YoutubeDL options 套用可用的 Cookies 設定"""
+    source = resolve_ytdlp_cookie_source()
+    if not source:
+        return ydl_opts
+    kind, value = source
+    if kind == "file":
+        ydl_opts["cookiefile"] = value
+    elif kind == "browser":
+        ydl_opts["cookiesfrombrowser"] = (value,)
+    return ydl_opts
+
+
+def _apply_ytdlp_cookie_cli(cmd: list[str]) -> list[str]:
+    """為 yt-dlp CLI 指令套用可用的 Cookies 參數"""
+    source = resolve_ytdlp_cookie_source()
+    if not source:
+        return cmd
+    kind, value = source
+    if kind == "file":
+        cmd.extend(["--cookies", value])
+    elif kind == "browser":
+        cmd.extend(["--cookies-from-browser", value])
+    return cmd
+
+
+def _fetch_oembed_metadata(url: str) -> tuple[str, str] | None:
+    """透過 YouTube 官方 oEmbed API 取得影片標題與頻道名稱（不需登入、不受串流風控影響）"""
+    oembed_url = f"https://www.youtube.com/oembed?url={quote(url, safe='')}&format=json"
+    req = urllib.request.Request(
+        oembed_url,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        title = str(data.get("title") or "").strip()
+        author = str(data.get("author_name") or "").strip()
+        if title or author:
+            return (title, author)
+    except Exception:
+        pass
+    return None
 
 
 def extract_video_id(url: str) -> str:
@@ -85,12 +181,14 @@ def format_timestamp(seconds: float) -> str:
 
 
 def get_video_metadata(url: str, video_id: str) -> VideoMetadata:
-    """透過 yt-dlp 取得影片標題、頻道與長度（不下載檔案）"""
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
+    """透過 yt-dlp 取得影片標題、頻道與長度（失敗時以 YouTube oEmbed 備援）"""
+    ydl_opts = _apply_ytdlp_cookie_opts(
+        {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+        }
+    )
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -101,6 +199,15 @@ def get_video_metadata(url: str, video_id: str) -> VideoMetadata:
                 duration_seconds=int(info.get("duration") or 0),
             )
     except Exception:
+        oembed = _fetch_oembed_metadata(url)
+        if oembed is not None:
+            oembed_title, oembed_author = oembed
+            return VideoMetadata(
+                video_id=video_id,
+                title=oembed_title or f"YouTube 影片 ({video_id})",
+                channel=oembed_author or "未知頻道",
+                duration_seconds=0,
+            )
         return VideoMetadata(
             video_id=video_id,
             title=f"YouTube 影片 ({video_id})",
@@ -183,12 +290,14 @@ def extract_audio_for_gemini(url: str, temp_dir: Path) -> Path:
     """當影片無字幕時，使用 yt-dlp 擷取音訊檔供 Gemini 多模態分析"""
     temp_dir.mkdir(parents=True, exist_ok=True)
     out_tmpl = str(temp_dir / "%(id)s.%(ext)s")
-    ydl_opts: dict = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
-        "outtmpl": out_tmpl,
-        "quiet": True,
-        "no_warnings": True,
-    }
+    ydl_opts: dict = _apply_ytdlp_cookie_opts(
+        {
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "outtmpl": out_tmpl,
+            "quiet": True,
+            "no_warnings": True,
+        }
+    )
     if has_ffmpeg():
         ydl_opts["postprocessors"] = [
             {
@@ -328,6 +437,7 @@ def download_media(
             else "best[ext=mp4]/best"
         )
         cmd.extend(["-f", fmt_selector, "--merge-output-format", "mp4"])
+    _apply_ytdlp_cookie_cli(cmd)
     cmd.append(url)
 
     proc_env = {**os.environ, "PYTHONUNBUFFERED": "1"}

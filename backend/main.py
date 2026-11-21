@@ -24,6 +24,7 @@ from schemas import (
 from services.gemini_service import (
     analyze_audio_with_gemini,
     analyze_transcript_with_gemini,
+    analyze_youtube_url_with_gemini,
     chat_follow_up,
     has_configured_api_key,
     save_local_api_key,
@@ -44,8 +45,10 @@ from services.youtube_service import (
     extract_audio_for_gemini,
     extract_video_id,
     format_transcript_as_srt,
+    format_ytdlp_error,
     get_transcript,
     get_video_metadata,
+    has_configured_cookies,
     has_ffmpeg,
     terminate_process_tree,
 )
@@ -78,6 +81,7 @@ def health_check():
         "status": "ok",
         "ffmpeg_available": has_ffmpeg(),
         "gemini_key_configured": has_configured_api_key(),
+        "cookies_configured": has_configured_cookies(),
         "model": os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
     }
 
@@ -113,21 +117,43 @@ def analyze_video(req: AnalyzeRequest):
             source_label = transcript.source_label
             excerpt = transcript.text[:15_000]
         else:
-            # 無字幕備援：擷取音訊交由 Gemini 多模態理解
-            with tempfile.TemporaryDirectory() as tmp:
-                audio_path = extract_audio_for_gemini(canonical_url, Path(tmp))
-                knowledge = analyze_audio_with_gemini(
+            # 無字幕或本機 IP 受限：優先使用 Gemini 原生 YouTube URL 直讀，失敗再退回音訊擷取
+            try:
+                knowledge = analyze_youtube_url_with_gemini(
                     video_title=meta.title,
-                    audio_path=audio_path,
+                    youtube_url=canonical_url,
                     level=req.level,
                     api_key_override=req.api_key,
                 )
-            source_label = "無字幕（由音訊直接解析）"
-            excerpt = knowledge.video_summary_one_liner
+                source_label = "Gemini 直接解析 YouTube 影片"
+                excerpt = knowledge.video_summary_one_liner
+            except ValueError:
+                raise
+            except Exception as url_exc:
+                try:
+                    with tempfile.TemporaryDirectory() as tmp:
+                        audio_path = extract_audio_for_gemini(canonical_url, Path(tmp))
+                        knowledge = analyze_audio_with_gemini(
+                            video_title=meta.title,
+                            audio_path=audio_path,
+                            level=req.level,
+                            api_key_override=req.api_key,
+                        )
+                    source_label = "無字幕（由音訊直接解析）"
+                    excerpt = knowledge.video_summary_one_liner
+                except ValueError:
+                    raise
+                except Exception as audio_exc:
+                    raise RuntimeError(
+                        f"影片直讀失敗（{url_exc}）；音訊備援亦失敗：{format_ytdlp_error(str(audio_exc))}"
+                    ) from audio_exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Gemini 分析失敗：{exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gemini 分析失敗：{format_ytdlp_error(str(exc))}",
+        ) from exc
 
     result = VideoAnalysisResponse(
         video_id=meta.video_id,
@@ -175,9 +201,9 @@ def download_video_or_audio(req: DownloadRequest):
     try:
         file_path = download_media(canonical_url, req.format, DOWNLOADS_DIR)
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=format_ytdlp_error(str(exc))) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"下載失敗：{exc}") from exc
+        raise HTTPException(status_code=500, detail=f"下載失敗：{format_ytdlp_error(str(exc))}") from exc
 
     media_type = "audio/mpeg" if req.format == "mp3" else "video/mp4"
     return FileResponse(
@@ -250,7 +276,7 @@ def _spawn_download_thread(task_id: str, generation: int) -> None:
             with lock:
                 if task["generation"] == generation and task["control"] == "run":
                     task["status"] = "error"
-                    task["error"] = str(exc)
+                    task["error"] = format_ytdlp_error(str(exc))
         finally:
             with lock:
                 if task["generation"] == generation:
