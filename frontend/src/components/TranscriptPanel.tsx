@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, Copy, Languages, Loader2, Play, Search } from "lucide-react";
-import { translateTranscript } from "@/lib/api";
+import { Check, Copy, Languages, Loader2, Mic, Play, Search } from "lucide-react";
+import { transcribeTranscript, translateTranscript } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/exportMarkdown";
 import { TranscriptLine, VideoAnalysisResponse } from "@/types/knowledge";
 
@@ -29,6 +29,7 @@ export default function TranscriptPanel({
 }: TranscriptPanelProps) {
   const [langMode, setLangMode] = useState<TranscriptLangMode>("original");
   const [translating, setTranslating] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [copied, setCopied] = useState(false);
@@ -36,6 +37,9 @@ export default function TranscriptPanel({
   const originalLines = data.transcript_lines ?? [];
   const zhTwLines = data.transcript_zh_tw_lines ?? [];
   const activeLines = langMode === "zh-tw" ? zhTwLines : originalLines;
+  const isLongVideoSkippedAuto =
+    originalLines.length === 0 && data.duration_seconds > 20 * 60;
+  const isAiTranscribed = data.transcript_source.includes("AI 語音聽寫");
 
   const filteredLines = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -72,6 +76,33 @@ export default function TranscriptPanel({
       );
     } finally {
       setTranslating(false);
+    }
+  };
+
+  const handleAiTranscribe = async () => {
+    if (transcribing || translating) return;
+    setLangMode("original");
+    setTranscribing(true);
+    setTranslateError(null);
+    try {
+      const res = await transcribeTranscript({
+        videoId: data.video_id,
+        apiKey,
+      });
+      onTranscriptUpdated({
+        transcript_language: res.transcript_language,
+        transcript_lines: res.transcript_lines,
+        transcript_zh_tw_lines: res.transcript_zh_tw_lines,
+      });
+      if (!res.cached) {
+        onNotify?.("已完成 AI 語音聽寫並快取於本機！");
+      }
+    } catch (err) {
+      setTranslateError(
+        err instanceof Error ? err.message : "AI 語音聽寫失敗，請稍後再試"
+      );
+    } finally {
+      setTranscribing(false);
     }
   };
 
@@ -127,6 +158,16 @@ export default function TranscriptPanel({
           </button>
         </div>
 
+        {isAiTranscribed && (
+          <span
+            title="此逐字稿由 Gemini AI 語音聽寫生成，時間軸為模型語意分段估算"
+            className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30"
+          >
+            <Mic className="w-3 h-3" />
+            AI 聽寫
+          </span>
+        )}
+
         <div className="flex items-center gap-2 flex-1 justify-end min-w-[200px]">
           <div className="relative flex-1 max-w-xs">
             <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -165,38 +206,54 @@ export default function TranscriptPanel({
       </div>
 
       {/* Content Area */}
-      {translating ? (
+      {translating || transcribing ? (
         <div className="py-12 flex flex-col items-center justify-center gap-2.5 text-xs text-[var(--text-muted)]">
           <Loader2 className="w-5 h-5 animate-spin text-[var(--accent-purple)]" />
-          <p>正在轉換為台灣繁體中文逐字稿（完成後會自動快取於本機）...</p>
+          <p>
+            {transcribing
+              ? "正在透過 AI 聆聽影片並產生時間軸逐字稿（完成後會永久快取於本機）..."
+              : "正在轉換為台灣繁體中文逐字稿（完成後會自動快取於本機）..."}
+          </p>
         </div>
       ) : translateError ? (
         <div className="p-4 rounded-xl border border-rose-500/40 bg-rose-500/10 text-xs text-[var(--accent-rose)] space-y-2">
           <p>⚠️ {translateError}</p>
           <button
             type="button"
-            onClick={handleSelectZhTw}
+            onClick={langMode === "zh-tw" ? handleSelectZhTw : handleAiTranscribe}
             className="px-3 py-1.5 rounded-md bg-rose-500/20 hover:bg-rose-500/30 cursor-pointer font-medium"
           >
             重新嘗試
           </button>
         </div>
       ) : activeLines.length === 0 ? (
-        <div className="p-6 rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-page)] text-center space-y-2.5">
+        <div className="p-6 rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-page)] text-center space-y-3">
           <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-            {isLegacyOrNoSubtitle
-              ? "此紀錄尚未儲存逐字稿（可能為無字幕影片，或為舊版解析檔）。"
-              : "尚無可顯示的逐字稿內容。"}
+            {isLongVideoSkippedAuto
+              ? "此影片超過 20 分鐘且作者未提供字幕，為節省 AI Token 已略過自動聽寫；若需要逐字稿，可點擊下方按鈕按需生成。"
+              : isLegacyOrNoSubtitle
+                ? "此紀錄尚未儲存逐字稿（可能為無字幕影片，或為舊版解析檔）。"
+                : "尚無可顯示的逐字稿內容。"}
           </p>
           {isLegacyOrNoSubtitle && (
-            <button
-              type="button"
-              onClick={handleSelectZhTw}
-              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white cursor-pointer transition"
-            >
-              <Languages className="w-3.5 h-3.5" />
-              嘗試從 YouTube 補抓原文與繁中逐字稿
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={handleAiTranscribe}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white cursor-pointer transition"
+              >
+                <Mic className="w-3.5 h-3.5" />
+                使用 AI 語音聽寫生成逐字稿
+              </button>
+              <button
+                type="button"
+                onClick={handleSelectZhTw}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] hover:bg-[var(--bg-elevated)] text-[var(--text-main)] cursor-pointer transition"
+              >
+                <Languages className="w-3.5 h-3.5" />
+                直接聽寫並轉為繁體中文
+              </button>
+            </div>
           )}
         </div>
       ) : filteredLines.length === 0 ? (

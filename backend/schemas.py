@@ -108,6 +108,23 @@ class TranslateTranscriptRequest(BaseModel):
     api_key: str | None = None
 
 
+class TranscribeTranscriptRequest(BaseModel):
+    video_id: str
+    api_key: str | None = None
+
+
+class GeminiTranscriptOutput(BaseModel):
+    """Gemini 多模態聽寫逐字稿結構化輸出"""
+    language_code: str = Field(
+        default="zh-TW",
+        description="影片口語主要語言代碼，例如 en、zh-TW、ja",
+    )
+    lines: list[TranscriptLine] = Field(
+        default_factory=list,
+        description="按時間順序排列的語意分段逐字稿，每段約 15~30 秒或一個完整語意句",
+    )
+
+
 class TranslateTranscriptResponse(BaseModel):
     video_id: str
     transcript_language: str = ""

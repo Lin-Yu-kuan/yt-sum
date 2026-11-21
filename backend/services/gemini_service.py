@@ -9,7 +9,7 @@ from typing import Literal
 from google import genai
 from google.genai import types
 
-from schemas import ChatMessage, GeminiKnowledgeOutput
+from schemas import ChatMessage, GeminiKnowledgeOutput, GeminiTranscriptOutput
 
 try:
     from opencc import OpenCC
@@ -358,6 +358,107 @@ def analyze_audio_with_gemini(
             client.files.delete(name=uploaded.name)
         except Exception:
             pass
+
+
+_TRANSCRIBE_PROMPT_TEMPLATE = """影片標題：{video_title}
+這部影片沒有提供官方文字字幕，請你仔細聆聽語音內容，產出完整的時間軸逐字稿。
+請嚴格遵守以下規則：
+1. 【語意斷句】：以完整語意句或約 15～30 秒為一個段落切分（避免每隔 1～2 秒就切一行，以節省篇幅並保持閱讀流暢）。
+2. 【時間戳記】：每段提供準確的起始時間 `timestamp`（格式 `mm:ss` 或 `hh:mm:ss`）與對應整數秒數 `seconds`。
+3. 【語言規範】：保持影片原本的口語語言；若口語為中文，請一律輸出【台灣繁體中文】（正體中文），嚴禁簡體中文。
+4. 【忠實聽寫】：只記錄實際聽到的講話內容，不要加入無關的評論或摘要。"""
+
+
+def _format_secs_mmss(seconds: int) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _normalize_transcribed_lines(parsed: GeminiTranscriptOutput) -> tuple[str, list[dict]]:
+    """清理並正規化 Gemini 多模態聽寫逐字稿輸出"""
+    lang = (parsed.language_code or "").strip() or "zh-TW"
+    is_zh = lang.lower().startswith("zh")
+    normalized: list[dict] = []
+    for item in parsed.lines:
+        text = (item.text or "").strip()
+        if not text:
+            continue
+        if is_zh:
+            text = to_traditional_chinese(text)
+        secs = max(0, int(item.seconds))
+        ts = (item.timestamp or "").strip() or _format_secs_mmss(secs)
+        normalized.append({"timestamp": ts, "seconds": secs, "text": text})
+    normalized.sort(key=lambda x: x["seconds"])
+    if not normalized:
+        raise RuntimeError("AI 語音聽寫未回傳任何有效逐字稿內容。")
+    return lang, normalized
+
+
+def transcribe_audio_with_gemini(
+    video_title: str,
+    audio_path: Path,
+    api_key_override: str | None = None,
+) -> tuple[str, list[dict]]:
+    """優先使用純音訊檔案呼叫 Gemini 多模態聽寫逐字稿（大幅節省 Input Token）"""
+    client = _get_client(api_key_override)
+    uploaded = client.files.upload(file=str(audio_path))
+    try:
+        prompt = _TRANSCRIBE_PROMPT_TEMPLATE.format(video_title=video_title)
+        response = _generate_with_fallback(
+            client=client,
+            contents=[uploaded, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=GeminiTranscriptOutput,
+                temperature=0.2,
+            ),
+        )
+        parsed = (
+            response.parsed
+            if response.parsed is not None
+            else GeminiTranscriptOutput.model_validate_json(response.text)
+        )
+        return _normalize_transcribed_lines(parsed)
+    finally:
+        try:
+            client.files.delete(name=uploaded.name)
+        except Exception:
+            pass
+
+
+def transcribe_youtube_url_with_gemini(
+    video_title: str,
+    youtube_url: str,
+    api_key_override: str | None = None,
+) -> tuple[str, list[dict]]:
+    """備援：當本機無法擷取音訊時，直接透過 YouTube URL 請 Gemini 聽寫逐字稿"""
+    client = _get_client(api_key_override)
+    prompt = _TRANSCRIBE_PROMPT_TEMPLATE.format(video_title=video_title)
+    contents = types.Content(
+        parts=[
+            types.Part(file_data=types.FileData(file_uri=youtube_url)),
+            types.Part.from_text(text=prompt),
+        ]
+    )
+    response = _generate_with_fallback(
+        client=client,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=GeminiTranscriptOutput,
+            temperature=0.2,
+        ),
+    )
+    parsed = (
+        response.parsed
+        if response.parsed is not None
+        else GeminiTranscriptOutput.model_validate_json(response.text)
+    )
+    return _normalize_transcribed_lines(parsed)
 
 
 def chat_follow_up(

@@ -625,3 +625,233 @@ def test_translate_transcript_endpoint_uses_opencc_and_cache(tmp_path, monkeypat
     res2 = client.post("/api/transcript/translate", json={"video_id": video_id})
     assert res2.status_code == 200
     assert res2.json()["cached"] is True
+
+
+def test_history_endpoints_normalize_simplified_chinese_to_zh_tw(tmp_path, monkeypatch):
+    hist_dir = tmp_path / "history"
+    monkeypatch.setattr(history_service, "HISTORY_DIR", hist_dir)
+
+    video_id = "1IWTM9wFc5E"
+    history_service.save_history(
+        analysis={
+            "video_id": video_id,
+            "title": "服务器磁盘与软件管理",
+            "channel": "Test",
+            "duration_seconds": 120,
+            "transcript_source": "Chinese (Simplified)",
+            "level": "intermediate",
+            "video_summary_one_liner": "本影片完整解析基本磁盘设定与动态磁盘架构，深入探讨镜像与企业级存储应用。",
+            "prerequisites": [
+                {
+                    "id": "p1",
+                    "name": "磁盘阵列基础",
+                    "importance": "required",
+                    "why_needed": "涉及跨区、等量、镜像与容错。",
+                    "plain_explanation": "把多颗硬盘组成团队提升效能与备份。",
+                }
+            ],
+            "core_concepts": [
+                {
+                    "id": "c1",
+                    "title": "动态磁盘架构",
+                    "timestamp": "01:00",
+                    "seconds": 60,
+                    "summary": "说明软件如何管理内存与磁盘分区。",
+                    "example_in_video": "建立镜像磁盘区",
+                    "depends_on": ["磁盘阵列基础"],
+                }
+            ],
+            "extensions": [
+                {
+                    "id": "e1",
+                    "type": "vertical",
+                    "title": "企业级存储容错",
+                    "description": "了解服务器硬盘损坏时的重建流程。",
+                    "suggested_prompt": "请说明镜像与 RAID-5 的差异。",
+                }
+            ],
+            "graph_edges": [{"source_id": "p1", "target_id": "c1"}],
+            "transcript_excerpt": "欢迎来到服务器课程",
+            "chapters": [{"title": "基本磁盘设定", "timestamp": "00:00", "start_seconds": 0}],
+            "transcript_language": "zh-CN",
+            "transcript_lines": [{"timestamp": "00:00", "seconds": 0, "text": "欢迎来到服务器课程"}],
+            "transcript_zh_tw_lines": [],
+        },
+        chat_messages=[
+            {"role": "user", "content": "请解释什么是镜像？"},
+            {"role": "assistant", "content": "镜像就是将数据同时写入两颗磁盘以提供容错。"},
+        ],
+    )
+
+    list_res = client.get("/api/history")
+    assert list_res.status_code == 200
+    summary_item = list_res.json()["items"][0]
+    assert "磁碟" in summary_item["video_summary_one_liner"]
+    assert "架构" not in summary_item["video_summary_one_liner"]
+    assert "架構" in summary_item["video_summary_one_liner"]
+    assert "伺服器" in summary_item["title"]
+
+    detail_res = client.get(f"/api/history/{video_id}")
+    assert detail_res.status_code == 200
+    detail = detail_res.json()
+    analysis = detail["analysis"]
+    assert "磁碟" in analysis["video_summary_one_liner"]
+    assert "映象" in analysis["prerequisites"][0]["why_needed"]
+    assert "記憶體" in analysis["core_concepts"][0]["summary"]
+    assert "伺服器" in analysis["extensions"][0]["description"]
+    assert "磁碟" in analysis["chapters"][0]["title"]
+    # 原文逐字稿應保持原樣，供使用者切換原文檢視
+    assert analysis["transcript_lines"][0]["text"] == "欢迎来到服务器课程"
+    # 助理回覆轉為繁體，使用者提問保留原樣
+    assert "磁碟" in detail["chat_messages"][1]["content"]
+    assert detail["chat_messages"][0]["content"] == "请解释什么是镜像？"
+
+
+def _sample_knowledge_output() -> GeminiKnowledgeOutput:
+    return GeminiKnowledgeOutput.model_validate(
+        {
+            "video_summary_one_liner": "無字幕影片知識總結。",
+            "prerequisites": [
+                {
+                    "id": "p1",
+                    "name": "基礎概念",
+                    "importance": "required",
+                    "why_needed": "理解後續內容",
+                    "plain_explanation": "白話說明。",
+                }
+            ],
+            "core_concepts": [
+                {
+                    "id": "c1",
+                    "title": "核心重點",
+                    "timestamp": "00:30",
+                    "seconds": 30,
+                    "summary": "重點摘要。",
+                    "example_in_video": "影片範例",
+                    "depends_on": ["基礎概念"],
+                }
+            ],
+            "extensions": [
+                {
+                    "id": "e1",
+                    "type": "vertical",
+                    "title": "延伸思考",
+                    "description": "深入理解。",
+                    "suggested_prompt": "請進一步解釋。",
+                }
+            ],
+            "graph_edges": [{"source_id": "p1", "target_id": "c1"}],
+        }
+    )
+
+
+def test_analyze_no_subtitle_short_video_auto_transcribes(tmp_path, monkeypatch):
+    import main as main_module
+    from services.youtube_service import VideoMetadata
+
+    monkeypatch.setattr(history_service, "HISTORY_DIR", tmp_path / "history")
+    monkeypatch.setattr(
+        main_module,
+        "get_video_metadata",
+        lambda url, vid: VideoMetadata(
+            video_id=vid,
+            title="Short No Subtitle Video",
+            channel="Test Channel",
+            duration_seconds=300,
+        ),
+    )
+    monkeypatch.setattr(main_module, "get_transcript", lambda vid: None)
+    monkeypatch.setattr(
+        main_module,
+        "analyze_youtube_url_with_gemini",
+        lambda **kwargs: _sample_knowledge_output(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_ai_transcribe_no_subtitle",
+        lambda **kwargs: (
+            "en",
+            [{"timestamp": "00:00", "seconds": 0, "text": "Hello everyone."}],
+            "AI 語音聽寫（純音訊）",
+        ),
+    )
+
+    res = client.post(
+        "/api/analyze",
+        json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "level": "intermediate"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert "AI 語音聽寫（純音訊）" in body["transcript_source"]
+    assert body["transcript_language"] == "en"
+    assert len(body["transcript_lines"]) == 1
+    assert body["transcript_lines"][0]["text"] == "Hello everyone."
+    assert "Hello everyone." in body["transcript_excerpt"]
+
+
+def test_analyze_no_subtitle_long_video_skips_auto_and_supports_on_demand(tmp_path, monkeypatch):
+    import main as main_module
+    from services.youtube_service import VideoMetadata
+
+    monkeypatch.setattr(history_service, "HISTORY_DIR", tmp_path / "history")
+    monkeypatch.setattr(
+        main_module,
+        "get_video_metadata",
+        lambda url, vid: VideoMetadata(
+            video_id=vid,
+            title="Long No Subtitle Video",
+            channel="Test Channel",
+            duration_seconds=1800,  # 30 分鐘，超過 20 分鐘門檻
+        ),
+    )
+    monkeypatch.setattr(main_module, "get_transcript", lambda vid: None)
+    monkeypatch.setattr(
+        main_module,
+        "analyze_youtube_url_with_gemini",
+        lambda **kwargs: _sample_knowledge_output(),
+    )
+
+    ai_calls = {"count": 0}
+
+    def _fake_ai_transcribe(**kwargs):
+        ai_calls["count"] += 1
+        return (
+            "zh-TW",
+            [{"timestamp": "00:10", "seconds": 10, "text": "這是長片按需聽寫測試。"}],
+            "AI 語音聽寫（純音訊）",
+        )
+
+    monkeypatch.setattr(main_module, "_ai_transcribe_no_subtitle", _fake_ai_transcribe)
+
+    res = client.post(
+        "/api/analyze",
+        json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "level": "intermediate"},
+    )
+    assert res.status_code == 200
+    assert res.json()["transcript_lines"] == []
+    assert ai_calls["count"] == 0
+
+    # 按需點擊觸發聽寫
+    tr_res = client.post("/api/transcript/transcribe", json={"video_id": "dQw4w9WgXcQ"})
+    assert tr_res.status_code == 200
+    tr_body = tr_res.json()
+    assert tr_body["cached"] is False
+    assert len(tr_body["transcript_lines"]) == 1
+    assert tr_body["transcript_zh_tw_lines"][0]["text"] == "這是長片按需聽寫測試。"
+    assert ai_calls["count"] == 1
+
+    # 再次呼叫應命中本機快取（0 token）
+    tr_res2 = client.post("/api/transcript/transcribe", json={"video_id": "dQw4w9WgXcQ"})
+    assert tr_res2.status_code == 200
+    assert tr_res2.json()["cached"] is True
+    assert ai_calls["count"] == 1
+
+    # 無原生字幕但已有快取時，應可正常匯出 SRT
+    dl_res = client.post(
+        "/api/transcript/download",
+        json={"url": "dQw4w9WgXcQ", "format": "srt", "translate_to_zh_tw": True},
+    )
+    assert dl_res.status_code == 200
+    assert "00:00:10,000 -->" in dl_res.text
+    assert "這是長片按需聽寫測試。" in dl_res.text
+    assert ai_calls["count"] == 1

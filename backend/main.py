@@ -21,6 +21,7 @@ from schemas import (
     ChatResponse,
     DownloadRequest,
     TranscriptLine,
+    TranscribeTranscriptRequest,
     TranslateTranscriptRequest,
     TranslateTranscriptResponse,
     VideoAnalysisResponse,
@@ -33,6 +34,8 @@ from services.gemini_service import (
     has_configured_api_key,
     save_local_api_key,
     to_traditional_chinese,
+    transcribe_audio_with_gemini,
+    transcribe_youtube_url_with_gemini,
     translate_transcript_lines_to_zh_tw,
     translate_transcript_to_zh_tw,
 )
@@ -103,6 +106,9 @@ def save_api_key(req: SaveKeyRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+AUTO_TRANSCRIBE_MAX_SECONDS = 20 * 60
+
+
 def _snippets_to_lines(snippets: list[dict]) -> list[TranscriptLine]:
     return [
         TranscriptLine(
@@ -112,6 +118,61 @@ def _snippets_to_lines(snippets: list[dict]) -> list[TranscriptLine]:
         )
         for s in snippets
     ]
+
+
+def _lines_to_snippets(lines: list[dict]) -> list[dict]:
+    """將逐字稿行列表轉回 SRT 格式化所需的 snippets 結構"""
+    snippets: list[dict] = []
+    for idx, line in enumerate(lines):
+        start = float(line.get("seconds") or 0)
+        if idx + 1 < len(lines):
+            next_start = float(lines[idx + 1].get("seconds") or start)
+            duration = max(1.0, min(30.0, next_start - start))
+        else:
+            duration = 5.0
+        snippets.append({"start": start, "duration": duration, "text": str(line.get("text") or "")})
+    return snippets
+
+
+def _lines_to_plain_text(lines: list[dict]) -> str:
+    return "\n".join(f"[{line['timestamp']}] {line['text']}" for line in lines)
+
+
+def _ai_transcribe_no_subtitle(
+    video_id: str,
+    video_title: str,
+    api_key_override: str | None = None,
+) -> tuple[str, list[dict], str]:
+    """無字幕影片的 AI 語音聽寫：優先純音訊（省 Input Token），失敗退回 YouTube URL 直讀"""
+    canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+    audio_exc: Exception | None = None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = extract_audio_for_gemini(canonical_url, Path(tmp))
+            lang, lines = transcribe_audio_with_gemini(
+                video_title=video_title,
+                audio_path=audio_path,
+                api_key_override=api_key_override,
+            )
+            return lang, lines, "AI 語音聽寫（純音訊）"
+    except ValueError:
+        raise
+    except Exception as exc:
+        audio_exc = exc
+
+    try:
+        lang, lines = transcribe_youtube_url_with_gemini(
+            video_title=video_title,
+            youtube_url=canonical_url,
+            api_key_override=api_key_override,
+        )
+        return lang, lines, "AI 語音聽寫（影片直讀）"
+    except ValueError:
+        raise
+    except Exception as url_exc:
+        raise RuntimeError(
+            f"AI 語音聽寫失敗（音訊：{format_ytdlp_error(str(audio_exc))}；直讀：{url_exc}）"
+        ) from url_exc
 
 
 @app.post("/api/analyze", response_model=VideoAnalysisResponse)
@@ -124,6 +185,9 @@ def analyze_video(req: AnalyzeRequest):
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
     meta = get_video_metadata(canonical_url, video_id)
     transcript = get_transcript(video_id)
+
+    ai_transcribed_lines: list[dict] = []
+    ai_transcribed_lang = ""
 
     try:
         if transcript is not None:
@@ -169,6 +233,22 @@ def analyze_video(req: AnalyzeRequest):
                     raise RuntimeError(
                         f"影片直讀失敗（{url_exc}）；音訊備援亦失敗：{format_ytdlp_error(str(audio_exc))}"
                     ) from audio_exc
+
+            # 混合模式：20 分鐘以內的無字幕影片自動執行 AI 聽寫，超過 20 分鐘改由使用者按需觸發
+            if 0 < meta.duration_seconds <= AUTO_TRANSCRIBE_MAX_SECONDS:
+                try:
+                    ai_transcribed_lang, ai_transcribed_lines, ai_label = _ai_transcribe_no_subtitle(
+                        video_id=video_id,
+                        video_title=meta.title,
+                        api_key_override=req.api_key,
+                    )
+                    source_label = f"{source_label} + {ai_label}"
+                    excerpt = _lines_to_plain_text(ai_transcribed_lines)[:15_000] or excerpt
+                except ValueError:
+                    raise
+                except Exception:
+                    # 聽寫失敗時不影響已完成的知識圖譜，使用者稍後仍可在逐字稿分頁手動觸發
+                    pass
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -177,10 +257,15 @@ def analyze_video(req: AnalyzeRequest):
             detail=f"Gemini 分析失敗：{format_ytdlp_error(str(exc))}",
         ) from exc
 
-    transcript_lines = _snippets_to_lines(transcript.snippets) if transcript is not None else []
-    transcript_lang = transcript.language_code if transcript is not None else ""
+    if transcript is not None:
+        transcript_lines = _snippets_to_lines(transcript.snippets)
+        transcript_lang = transcript.language_code
+    else:
+        transcript_lines = [TranscriptLine(**item) for item in ai_transcribed_lines]
+        transcript_lang = ai_transcribed_lang
+
     transcript_zh_tw_lines: list[TranscriptLine] = []
-    if transcript is not None and transcript_lang.lower() in {"zh-tw", "zh-hant"}:
+    if transcript_lines and transcript_lang.lower() in {"zh-tw", "zh-hant", "zh"}:
         transcript_zh_tw_lines = [
             TranscriptLine(
                 timestamp=line.timestamp,
@@ -192,7 +277,7 @@ def analyze_video(req: AnalyzeRequest):
 
     result = VideoAnalysisResponse(
         video_id=meta.video_id,
-        title=meta.title,
+        title=to_traditional_chinese(meta.title),
         channel=meta.channel,
         duration_seconds=meta.duration_seconds,
         transcript_source=source_label,
@@ -203,7 +288,14 @@ def analyze_video(req: AnalyzeRequest):
         extensions=knowledge.extensions,
         graph_edges=knowledge.graph_edges,
         transcript_excerpt=excerpt,
-        chapters=[ChapterItem(**ch) for ch in meta.chapters],
+        chapters=[
+            ChapterItem(
+                title=to_traditional_chinese(str(ch.get("title") or "")),
+                timestamp=str(ch.get("timestamp") or "00:00"),
+                start_seconds=int(ch.get("start_seconds") or 0),
+            )
+            for ch in meta.chapters
+        ],
         transcript_language=transcript_lang,
         transcript_lines=transcript_lines,
         transcript_zh_tw_lines=transcript_zh_tw_lines,
@@ -462,16 +554,63 @@ def download_transcript(req: TranscriptDownloadRequest):
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
     meta = get_video_metadata(canonical_url, video_id)
     transcript = get_transcript(video_id)
-    if transcript is None:
-        raise HTTPException(status_code=404, detail="此影片沒有提供任何文字字幕，無法下載逐字稿。")
+
+    snippets: list[dict] = []
+    plain_text = ""
+    lang_code = ""
+    zh_cached_lines: list[dict] = []
+
+    if transcript is not None:
+        snippets = transcript.snippets
+        plain_text = transcript.text
+        lang_code = transcript.language_code
+    else:
+        record = get_history(video_id)
+        analysis = (record or {}).get("analysis", {})
+        cached_orig = analysis.get("transcript_lines") or []
+        zh_cached_lines = analysis.get("transcript_zh_tw_lines") or []
+        lang_code = str(analysis.get("transcript_language") or "")
+
+        if not cached_orig:
+            try:
+                lang_code, cached_orig, _ = _ai_transcribe_no_subtitle(
+                    video_id=video_id,
+                    video_title=meta.title,
+                    api_key_override=req.api_key,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"無字幕影片 AI 聽寫失敗：{exc}") from exc
+
+            if lang_code.lower().startswith("zh"):
+                zh_cached_lines = [
+                    {**item, "text": to_traditional_chinese(str(item.get("text") or ""))}
+                    for item in cached_orig
+                ]
+            update_history_transcript(
+                video_id=video_id,
+                transcript_lines=cached_orig,
+                transcript_zh_tw_lines=zh_cached_lines or None,
+                transcript_language=lang_code,
+                transcript_excerpt=_lines_to_plain_text(cached_orig)[:15_000],
+            )
+
+        if req.translate_to_zh_tw and zh_cached_lines:
+            snippets = _lines_to_snippets(zh_cached_lines)
+            plain_text = _lines_to_plain_text(zh_cached_lines)
+            lang_code = "zh-TW"
+        else:
+            snippets = _lines_to_snippets(cached_orig)
+            plain_text = _lines_to_plain_text(cached_orig)
 
     content = (
-        format_transcript_as_srt(transcript.snippets)
+        format_transcript_as_srt(snippets)
         if req.format == "srt"
-        else transcript.text + "\n"
+        else plain_text + "\n"
     )
 
-    is_already_zh_tw = transcript.language_code.lower() in {"zh-tw", "zh-hant"}
+    is_already_zh_tw = lang_code.lower() in {"zh-tw", "zh-hant"}
     if req.translate_to_zh_tw and not is_already_zh_tw:
         try:
             content = translate_transcript_to_zh_tw(content, api_key_override=req.api_key)
@@ -489,6 +628,70 @@ def download_transcript(req: TranscriptDownloadRequest):
         content=content.encode("utf-8-sig"),
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
+
+
+@app.post("/api/transcript/transcribe", response_model=TranslateTranscriptResponse)
+def transcribe_no_subtitle_video(req: TranscribeTranscriptRequest):
+    """為無字幕影片（或超過 20 分鐘未自動聽寫的長片）按需執行 AI 語音聽寫並快取"""
+    try:
+        video_id = extract_video_id(req.video_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    record = get_history(video_id)
+    analysis = (record or {}).get("analysis", {})
+    orig_lines = analysis.get("transcript_lines") or []
+    zh_lines = analysis.get("transcript_zh_tw_lines") or []
+    lang = str(analysis.get("transcript_language") or "")
+
+    if orig_lines:
+        return TranslateTranscriptResponse(
+            video_id=video_id,
+            transcript_language=lang,
+            transcript_lines=[TranscriptLine(**item) for item in orig_lines],
+            transcript_zh_tw_lines=[TranscriptLine(**item) for item in zh_lines],
+            cached=True,
+        )
+
+    transcript = get_transcript(video_id)
+    if transcript is not None:
+        orig_lines = [line.model_dump() for line in _snippets_to_lines(transcript.snippets)]
+        lang = transcript.language_code
+    else:
+        canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+        video_title = str(analysis.get("title") or "") or get_video_metadata(canonical_url, video_id).title
+        try:
+            lang, orig_lines, _ = _ai_transcribe_no_subtitle(
+                video_id=video_id,
+                video_title=video_title,
+                api_key_override=req.api_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"AI 語音聽寫失敗：{exc}") from exc
+
+    if lang.lower().startswith("zh") and not zh_lines:
+        zh_lines = [
+            {**item, "text": to_traditional_chinese(str(item.get("text") or ""))}
+            for item in orig_lines
+        ]
+
+    update_history_transcript(
+        video_id=video_id,
+        transcript_lines=orig_lines,
+        transcript_zh_tw_lines=zh_lines or None,
+        transcript_language=lang,
+        transcript_excerpt=_lines_to_plain_text(orig_lines)[:15_000],
+    )
+
+    return TranslateTranscriptResponse(
+        video_id=video_id,
+        transcript_language=lang,
+        transcript_lines=[TranscriptLine(**item) for item in orig_lines],
+        transcript_zh_tw_lines=[TranscriptLine(**item) for item in zh_lines],
+        cached=False,
     )
 
 
@@ -516,13 +719,22 @@ def translate_saved_transcript(req: TranslateTranscriptRequest):
 
     if not orig_lines:
         transcript = get_transcript(video_id)
-        if transcript is None:
-            raise HTTPException(
-                status_code=404,
-                detail="此影片沒有提供文字字幕，無法取得逐字稿。",
-            )
-        orig_lines = [line.model_dump() for line in _snippets_to_lines(transcript.snippets)]
-        lang = transcript.language_code
+        if transcript is not None:
+            orig_lines = [line.model_dump() for line in _snippets_to_lines(transcript.snippets)]
+            lang = transcript.language_code
+        else:
+            canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+            video_title = str(analysis.get("title") or "") or get_video_metadata(canonical_url, video_id).title
+            try:
+                lang, orig_lines, _ = _ai_transcribe_no_subtitle(
+                    video_id=video_id,
+                    video_title=video_title,
+                    api_key_override=req.api_key,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"無字幕影片 AI 聽寫失敗：{exc}") from exc
 
     try:
         translated = translate_transcript_lines_to_zh_tw(

@@ -286,3 +286,19 @@ export async function translateTranscript(params: {
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }
+
+export async function transcribeTranscript(params: {
+  videoId: string;
+  apiKey?: string;
+}): Promise<TranslateTranscriptResponse> {
+  const res = await fetch(`${getApiBase()}/api/transcript/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      video_id: params.videoId,
+      api_key: params.apiKey?.trim() || null,
+    }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
