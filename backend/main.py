@@ -8,7 +8,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -80,6 +80,14 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+@app.middleware("http")
+async def pwa_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path in ("/sw.js", "/manifest.json"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 class SaveKeyRequest(BaseModel):

@@ -29,6 +29,7 @@ import DependencyGraph from "@/components/DependencyGraph";
 import DownloadProgressBar from "@/components/DownloadProgressBar";
 import KnowledgeLayers from "@/components/KnowledgeLayers";
 import MissingComponentModal from "@/components/MissingComponentModal";
+import PwaInstallButton from "@/components/PwaInstallButton";
 import TimelineFlowchart from "@/components/TimelineFlowchart";
 import TranscriptPanel from "@/components/TranscriptPanel";
 import VideoPlayer from "@/components/VideoPlayer";
@@ -444,7 +445,7 @@ export default function HomePage() {
     );
     try {
       await navigator.clipboard.writeText(fullPrompt);
-      showToast("已複製完整研究 Prompt！請在新分頁直接 Ctrl+V 貼上");
+      showToast("已複製完整研究 Prompt！請在新分頁直接 Ctrl+V / ⌘+V 貼上");
     } catch {
       showToast("已開啟 Gemini，請手動複製提問內容");
     }
@@ -572,6 +573,8 @@ export default function HomePage() {
               <KeyRound className="w-3.5 h-3.5" />
               Key
             </button>
+
+            <PwaInstallButton />
 
             {analysis && (
               <button

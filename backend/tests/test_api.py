@@ -879,3 +879,23 @@ def test_user_data_paths_under_project_data_dir():
         *youtube_service.DEFAULT_COOKIES_PATHS,
     ):
         assert legacy_home_dir not in p.parents and p != legacy_home_dir
+
+
+def test_pwa_assets_served_with_no_cache():
+    manifest_res = client.get("/manifest.json")
+    assert manifest_res.status_code == 200
+    assert "no-cache" in manifest_res.headers.get("cache-control", "").lower()
+    manifest = manifest_res.json()
+    assert manifest["display"] == "standalone"
+    assert manifest["start_url"] == "/"
+
+    sw_res = client.get("/sw.js")
+    assert sw_res.status_code == 200
+    assert "no-cache" in sw_res.headers.get("cache-control", "").lower()
+    assert "/api/" in sw_res.text
+
+
+def test_terminate_process_tree_handles_none():
+    from services.youtube_service import terminate_process_tree
+
+    terminate_process_tree(None)

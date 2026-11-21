@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Copy, ExternalLink, RefreshCw, Terminal, X } from "lucide-react";
 
 interface MissingComponentModalProps {
@@ -17,14 +17,20 @@ export default function MissingComponentModal({
   const [copied, setCopied] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkMsg, setCheckMsg] = useState<string | null>(null);
+  const [isMac, setIsMac] = useState(false);
+
+  useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad/i.test(navigator.userAgent));
+  }, []);
 
   if (!open) return null;
 
-  const wingetCmd = "winget install Gyan.FFmpeg";
+  const installCmd = isMac ? "brew install ffmpeg" : "winget install Gyan.FFmpeg";
+  const launcherName = isMac ? "run_app.command" : "run_app.bat";
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(wingetCmd);
+      await navigator.clipboard.writeText(installCmd);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -41,7 +47,7 @@ export default function MissingComponentModal({
       setCheckMsg("✅ 已偵測到 FFmpeg！現在可以正常下載 MP3 與高畫質 MP4。");
       setTimeout(onClose, 1200);
     } else {
-      setCheckMsg("⚠️ 尚未偵測到 FFmpeg（安裝完成後，請關閉並重新啟動 run_app.bat 再按重新偵測）。");
+      setCheckMsg(`⚠️ 尚未偵測到 FFmpeg（安裝完成後，請關閉並重新啟動 ${launcherName} 再按重新偵測）。`);
     }
   };
 
@@ -80,13 +86,17 @@ export default function MissingComponentModal({
         <div className="space-y-3 text-xs leading-relaxed">
           <div className="p-3.5 rounded-xl bg-[var(--bg-page)] border border-[var(--border-subtle)] space-y-2">
             <div className="font-semibold text-[var(--text-main)]">
-              方法 1：Windows 一鍵指令安裝（最推薦）
+              {isMac
+                ? "方法 1：macOS Homebrew 一鍵指令安裝（最推薦）"
+                : "方法 1：Windows 一鍵指令安裝（最推薦）"}
             </div>
             <p className="text-[var(--text-muted)]">
-              打開 Windows 的「終端機 / PowerShell」，貼上並執行以下指令：
+              {isMac
+                ? "打開 macOS 的「終端機（Terminal）」，貼上並執行以下指令（若尚未安裝 Homebrew 可先至 brew.sh 安裝）："
+                : "打開 Windows 的「終端機 / PowerShell」，貼上並執行以下指令："}
             </p>
             <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] font-mono">
-              <span className="text-[var(--text-main)] select-all">{wingetCmd}</span>
+              <span className="text-[var(--text-main)] select-all">{installCmd}</span>
               <button
                 type="button"
                 onClick={handleCopy}
@@ -100,18 +110,30 @@ export default function MissingComponentModal({
 
           <div className="p-3.5 rounded-xl bg-[var(--bg-page)] border border-[var(--border-subtle)] space-y-2">
             <div className="font-semibold text-[var(--text-main)]">
-              方法 2：從官方網站手動下載安裝
+              {isMac ? "方法 2：Homebrew 或官方下載安裝" : "方法 2：從官方網站手動下載安裝"}
             </div>
             <div className="flex flex-wrap gap-2">
-              <a
-                href="https://www.gyan.dev/ffmpeg/builds/"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--accent-blue)] hover:border-blue-500/60"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                Windows 版下載 (gyan.dev)
-              </a>
+              {isMac ? (
+                <a
+                  href="https://brew.sh"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--accent-blue)] hover:border-blue-500/60"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Homebrew 官網 (brew.sh)
+                </a>
+              ) : (
+                <a
+                  href="https://www.gyan.dev/ffmpeg/builds/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--accent-blue)] hover:border-blue-500/60"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Windows 版下載 (gyan.dev)
+                </a>
+              )}
               <a
                 href="https://ffmpeg.org/download.html"
                 target="_blank"
@@ -123,7 +145,7 @@ export default function MissingComponentModal({
               </a>
             </div>
             <p className="text-[var(--text-muted)]">
-              安裝完成後，請關閉並重新啟動 <code className="px-1 py-0.5 rounded bg-[var(--bg-elevated)]">run_app.bat</code> 即可使用。
+              安裝完成後，請關閉並重新啟動 <code className="px-1 py-0.5 rounded bg-[var(--bg-elevated)]">{launcherName}</code> 即可使用。
             </p>
           </div>
         </div>

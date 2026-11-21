@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.request
@@ -392,7 +393,10 @@ def terminate_process_tree(
             if res.returncode != 0 and proc.poll() is None:
                 proc.kill()
         else:
-            proc.terminate()
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                proc.terminate()
     except Exception:
         try:
             proc.kill()
@@ -403,7 +407,13 @@ def terminate_process_tree(
         proc.wait(timeout=wait_timeout)
     except subprocess.TimeoutExpired:
         try:
-            proc.kill()
+            if os.name != "nt":
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+            else:
+                proc.kill()
             proc.wait(timeout=1.0)
         except Exception:
             pass
@@ -424,8 +434,13 @@ def download_media(
     ffmpeg_available = has_ffmpeg()
 
     if fmt == "mp3" and not ffmpeg_available:
+        install_hint = (
+            "brew install ffmpeg"
+            if sys.platform == "darwin"
+            else "winget install Gyan.FFmpeg"
+        )
         raise RuntimeError(
-            "本機尚未安裝 ffmpeg，無法轉檔為 MP3。請執行 `winget install Gyan.FFmpeg` 安裝後重試。"
+            f"本機尚未安裝 ffmpeg，無法轉檔為 MP3。請執行 `{install_hint}` 安裝後重試。"
         )
 
     def _check_control() -> None:
@@ -478,6 +493,7 @@ def download_media(
         encoding="utf-8",
         errors="replace",
         env=proc_env,
+        start_new_session=(os.name != "nt"),
     )
 
     pct_re = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%(?:.*?at\s+([^\s]+))?")
