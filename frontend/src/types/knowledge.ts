@@ -31,6 +31,19 @@ export interface GraphEdge {
   target_id: string;
 }
 
+export interface ChapterItem {
+  title: string;
+  timestamp: string;
+  start_seconds: number;
+  end_seconds?: number | null;
+}
+
+export interface TranscriptLine {
+  timestamp: string;
+  seconds: number;
+  text: string;
+}
+
 export interface VideoAnalysisResponse {
   video_id: string;
   title: string;
@@ -44,6 +57,18 @@ export interface VideoAnalysisResponse {
   extensions: ExtensionItem[];
   graph_edges: GraphEdge[];
   transcript_excerpt: string;
+  chapters?: ChapterItem[];
+  transcript_language?: string;
+  transcript_lines?: TranscriptLine[];
+  transcript_zh_tw_lines?: TranscriptLine[];
+}
+
+export interface TranslateTranscriptResponse {
+  video_id: string;
+  transcript_language: string;
+  transcript_lines: TranscriptLine[];
+  transcript_zh_tw_lines: TranscriptLine[];
+  cached: boolean;
 }
 
 export interface ChatMessage {

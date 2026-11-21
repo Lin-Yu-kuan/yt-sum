@@ -5,25 +5,25 @@ from pydantic import BaseModel, Field
 class PrerequisiteItem(BaseModel):
     """前置觀念項目：看懂這部影片前必須先具備的基礎概念"""
     id: str = Field(description="唯一識別碼，例如 p1, p2")
-    name: str = Field(description="前置觀念名稱（繁體中文，可附英文專有名詞）")
+    name: str = Field(description="前置觀念名稱（必須使用台灣繁體中文，嚴禁簡體中文，可於括號附英文專有名詞）")
     importance: Literal["required", "recommended"] = Field(
         description="必要程度：required 為必備，recommended 為建議了解"
     )
-    why_needed: str = Field(description="為什麼看這部影片前需要這個觀念（1~2句）")
-    plain_explanation: str = Field(description="1 分鐘白話科普解說（含生活化比喻，2~4句）")
+    why_needed: str = Field(description="為什麼看這部影片前需要這個觀念（1~2句，必須使用台灣繁體中文，嚴禁簡體中文）")
+    plain_explanation: str = Field(description="1 分鐘白話科普解說（含生活化比喻，2~4句，必須使用台灣繁體中文，嚴禁簡體中文）")
 
 
 class CoreConceptItem(BaseModel):
     """影片核心觀念項目：拆解影片實際講述的知識骨幹"""
     id: str = Field(description="唯一識別碼，例如 c1, c2")
-    title: str = Field(description="核心觀念標題")
+    title: str = Field(description="核心觀念標題（必須使用台灣繁體中文，嚴禁簡體中文）")
     timestamp: str = Field(description="影片對應時間點，格式 mm:ss 或 hh:mm:ss")
     seconds: int = Field(ge=0, description="對應時間點的總秒數，供播放器跳轉")
-    summary: str = Field(description="核心邏輯與觀念拆解（2~4句）")
-    example_in_video: str = Field(description="影片中講者舉的例子或補充說明")
+    summary: str = Field(description="核心邏輯與觀念拆解（2~4句，必須使用台灣繁體中文，嚴禁簡體中文）")
+    example_in_video: str = Field(description="影片中講者舉的例子或補充說明（必須使用台灣繁體中文，嚴禁簡體中文）")
     depends_on: list[str] = Field(
         default_factory=list,
-        description="此觀念依賴哪些前置觀念或前一個核心觀念的名稱",
+        description="此觀念依賴哪些前置觀念或前一個核心觀念的名稱（必須使用台灣繁體中文）",
     )
 
 
@@ -33,10 +33,10 @@ class ExtensionItem(BaseModel):
     type: Literal["vertical", "horizontal"] = Field(
         description="vertical 為縱向深究（底層原理/迷思），horizontal 為橫向延伸（應用/跨領域）"
     )
-    title: str = Field(description="延伸或深究主題標題")
-    description: str = Field(description="簡短說明為什麼值得深入或如何延伸（1~2句）")
+    title: str = Field(description="延伸或深究主題標題（必須使用台灣繁體中文，嚴禁簡體中文）")
+    description: str = Field(description="簡短說明為什麼值得深入或如何延伸（1~2句，必須使用台灣繁體中文，嚴禁簡體中文）")
     suggested_prompt: str = Field(
-        description="可直接送給 AI 進行深入探討的具體提問提示詞"
+        description="可直接送給 AI 進行深入探討的具體提問提示詞（必須使用台灣繁體中文，嚴禁簡體中文）"
     )
 
 
@@ -48,7 +48,7 @@ class GraphEdge(BaseModel):
 
 class GeminiKnowledgeOutput(BaseModel):
     """Gemini 結構化輸出格式"""
-    video_summary_one_liner: str = Field(description="一句話總結整部影片的核心價值")
+    video_summary_one_liner: str = Field(description="一句話總結整部影片的核心價值（必須使用台灣繁體中文，嚴禁簡體中文）")
     prerequisites: list[PrerequisiteItem] = Field(description="3~5 個最關鍵的前置觀念")
     core_concepts: list[CoreConceptItem] = Field(description="3~7 個影片核心觀念（按時間軸排列）")
     extensions: list[ExtensionItem] = Field(description="4~6 個縱向深究與橫向延伸方向")
@@ -67,6 +67,21 @@ class AnalyzeRequest(BaseModel):
     )
 
 
+class ChapterItem(BaseModel):
+    """YouTube 影片作者劃分的章節"""
+    title: str
+    timestamp: str
+    start_seconds: int = Field(ge=0)
+    end_seconds: int | None = None
+
+
+class TranscriptLine(BaseModel):
+    """單行時間軸逐字稿"""
+    timestamp: str
+    seconds: int = Field(ge=0)
+    text: str
+
+
 class VideoAnalysisResponse(BaseModel):
     video_id: str
     title: str
@@ -80,6 +95,25 @@ class VideoAnalysisResponse(BaseModel):
     extensions: list[ExtensionItem]
     graph_edges: list[GraphEdge]
     transcript_excerpt: str = Field(description="供後續追問對話使用的影片脈絡摘要")
+    chapters: list[ChapterItem] = Field(default_factory=list, description="YouTube 作者劃分章節")
+    transcript_language: str = Field(default="", description="原始字幕語言代碼")
+    transcript_lines: list[TranscriptLine] = Field(default_factory=list, description="原文逐字稿行列表")
+    transcript_zh_tw_lines: list[TranscriptLine] = Field(
+        default_factory=list, description="繁體中文逐字稿行列表（按需翻譯後快取）"
+    )
+
+
+class TranslateTranscriptRequest(BaseModel):
+    video_id: str
+    api_key: str | None = None
+
+
+class TranslateTranscriptResponse(BaseModel):
+    video_id: str
+    transcript_language: str = ""
+    transcript_lines: list[TranscriptLine] = Field(default_factory=list)
+    transcript_zh_tw_lines: list[TranscriptLine] = Field(default_factory=list)
+    cached: bool = False
 
 
 class ChatMessage(BaseModel):

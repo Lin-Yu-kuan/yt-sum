@@ -92,6 +92,28 @@ def update_history_state(
     return True
 
 
+def update_history_transcript(
+    video_id: str,
+    transcript_lines: list[dict] | None = None,
+    transcript_zh_tw_lines: list[dict] | None = None,
+    transcript_language: str | None = None,
+) -> bool:
+    """將逐字稿原文或繁中翻譯快取寫回本機歷史紀錄"""
+    path = _safe_video_path(video_id)
+    if not path.exists():
+        return False
+    data = json.loads(path.read_text(encoding="utf-8"))
+    analysis = data.setdefault("analysis", {})
+    if transcript_lines is not None:
+        analysis["transcript_lines"] = transcript_lines
+    if transcript_zh_tw_lines is not None:
+        analysis["transcript_zh_tw_lines"] = transcript_zh_tw_lines
+    if transcript_language is not None:
+        analysis["transcript_language"] = transcript_language
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
+
+
 def delete_history(video_id: str) -> bool:
     path = _safe_video_path(video_id)
     if not path.exists():

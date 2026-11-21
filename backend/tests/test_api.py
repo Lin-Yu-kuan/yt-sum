@@ -457,3 +457,171 @@ def test_gemini_fallback_on_503(monkeypatch):
     )
     assert resp.text == "ok"
     assert calls == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+
+
+def test_to_traditional_chinese_and_normalize_output():
+    converted = gemini_service.to_traditional_chinese(
+        "视频中的服务器内存与软件架构设计"
+    )
+    assert "影片" in converted
+    assert "伺服器" in converted
+    assert "記憶體" in converted
+    assert "軟體" in converted
+    assert "视频" not in converted
+
+    sample = GeminiKnowledgeOutput(
+        video_summary_one_liner="这部视频介绍服务器内存优化。",
+        prerequisites=[
+            {
+                "id": "p1",
+                "name": "服务器内存管理",
+                "importance": "required",
+                "why_needed": "理解系统内存分配",
+                "plain_explanation": "就像软件向系统借用临时工作台。",
+            }
+        ],
+        core_concepts=[
+            {
+                "id": "c1",
+                "title": "缓存命中率",
+                "timestamp": "01:20",
+                "seconds": 80,
+                "summary": "提升数据读取速度。",
+                "example_in_video": "数据库查询优化案例",
+                "depends_on": ["服务器内存管理"],
+            }
+        ],
+        extensions=[
+            {
+                "id": "e1",
+                "type": "vertical",
+                "title": "操作系统分页机制",
+                "description": "了解虚拟内存如何映射到物理内存。",
+                "suggested_prompt": "请说明软件如何处理内存分页？",
+            }
+        ],
+        graph_edges=[{"source_id": "p1", "target_id": "c1"}],
+    )
+
+    normalized = gemini_service.normalize_knowledge_to_zh_tw(sample)
+    assert "影片" in normalized.video_summary_one_liner
+    assert "伺服器" in normalized.prerequisites[0].name
+    assert "軟體" in normalized.prerequisites[0].plain_explanation
+    assert "快取" in normalized.core_concepts[0].title or "緩存" in normalized.core_concepts[0].title
+    assert "資料庫" in normalized.core_concepts[0].example_in_video
+    assert "伺服器" in normalized.core_concepts[0].depends_on[0]
+    assert "作業系統" in normalized.extensions[0].title
+    assert "軟體" in normalized.extensions[0].suggested_prompt
+
+
+def test_extract_chapters_and_analyze_includes_transcript_and_chapters(monkeypatch):
+    import main
+    from services import youtube_service
+    from services.youtube_service import TranscriptResult, VideoMetadata
+
+    raw_chapters = [
+        {"title": "主題一：介紹", "start_time": 0.0, "end_time": 65.0},
+        {"title": "主題二：實戰", "start_time": 65.0, "end_time": 180.0},
+    ]
+    parsed_chapters = youtube_service._extract_chapters(raw_chapters)
+    assert len(parsed_chapters) == 2
+    assert parsed_chapters[1]["timestamp"] == "01:05"
+    assert parsed_chapters[1]["start_seconds"] == 65
+
+    sample_knowledge = GeminiKnowledgeOutput(
+        video_summary_one_liner="影片摘要",
+        prerequisites=[],
+        core_concepts=[],
+        extensions=[],
+        graph_edges=[],
+    )
+
+    monkeypatch.setattr(
+        main,
+        "get_video_metadata",
+        lambda url, vid: VideoMetadata(
+            video_id=vid,
+            title="Chapter Test",
+            channel="Test",
+            duration_seconds=180,
+            chapters=parsed_chapters,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "get_transcript",
+        lambda vid: TranscriptResult(
+            text="[00:00] Hello\n[01:05] World",
+            source_label="English (人工字幕)",
+            language_code="en",
+            snippets=[
+                {"start": 0.0, "duration": 2.0, "text": "Hello"},
+                {"start": 65.0, "duration": 2.0, "text": "World"},
+            ],
+        ),
+    )
+    monkeypatch.setattr(main, "analyze_transcript_with_gemini", lambda **kwargs: sample_knowledge)
+    monkeypatch.setattr(main, "save_history", lambda data: None)
+
+    res = client.post(
+        "/api/analyze",
+        json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "level": "intermediate"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body["chapters"]) == 2
+    assert body["chapters"][1]["title"] == "主題二：實戰"
+    assert body["transcript_language"] == "en"
+    assert len(body["transcript_lines"]) == 2
+    assert body["transcript_lines"][1]["seconds"] == 65
+    # 英文影片初次解析不預先翻譯，保持零增量延遲
+    assert body["transcript_zh_tw_lines"] == []
+
+
+def test_translate_transcript_endpoint_uses_opencc_and_cache(tmp_path, monkeypatch):
+    import main
+
+    hist_dir = tmp_path / "history"
+    monkeypatch.setattr(history_service, "HISTORY_DIR", hist_dir)
+
+    video_id = "dQw4w9WgXcQ"
+    history_service.save_history(
+        {
+            "video_id": video_id,
+            "title": "簡中測試",
+            "channel": "Test",
+            "duration_seconds": 60,
+            "transcript_source": "中文",
+            "level": "intermediate",
+            "video_summary_one_liner": "測試",
+            "prerequisites": [],
+            "core_concepts": [],
+            "extensions": [],
+            "graph_edges": [],
+            "transcript_excerpt": "",
+            "transcript_language": "zh-CN",
+            "transcript_lines": [
+                {"timestamp": "00:00", "seconds": 0, "text": "欢迎来到服务器内存课程"},
+            ],
+            "transcript_zh_tw_lines": [],
+        }
+    )
+
+    # 簡中走 OpenCC，不應呼叫 Gemini client
+    monkeypatch.setattr(
+        gemini_service,
+        "_get_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("簡中轉換不應呼叫 Gemini")),
+    )
+
+    res1 = client.post("/api/transcript/translate", json={"video_id": video_id})
+    assert res1.status_code == 200
+    body1 = res1.json()
+    assert body1["cached"] is False
+    assert "伺服器" in body1["transcript_zh_tw_lines"][0]["text"]
+    assert "記憶體" in body1["transcript_zh_tw_lines"][0]["text"]
+
+    # 第二次呼叫直接命中快取
+    res2 = client.post("/api/transcript/translate", json={"video_id": video_id})
+    assert res2.status_code == 200
+    assert res2.json()["cached"] is True

@@ -3,6 +3,7 @@ import {
   HealthStatus,
   HistorySummaryItem,
   SavedHistoryRecord,
+  TranslateTranscriptResponse,
   UserLevel,
   VideoAnalysisResponse,
 } from "@/types/knowledge";
@@ -268,4 +269,20 @@ export async function deleteHistoryItem(videoId: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(await parseError(res));
+}
+
+export async function translateTranscript(params: {
+  videoId: string;
+  apiKey?: string;
+}): Promise<TranslateTranscriptResponse> {
+  const res = await fetch(`${getApiBase()}/api/transcript/translate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      video_id: params.videoId,
+      api_key: params.apiKey?.trim() || null,
+    }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
 }

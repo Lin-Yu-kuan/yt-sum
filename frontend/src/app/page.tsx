@@ -16,9 +16,11 @@ import {
   Music,
   PanelRightClose,
   PanelRightOpen,
+  ScrollText,
   Sparkles,
   Sun,
   Trash2,
+  Workflow,
   Youtube,
 } from "lucide-react";
 import ConfirmModal from "@/components/ConfirmModal";
@@ -27,6 +29,8 @@ import DependencyGraph from "@/components/DependencyGraph";
 import DownloadProgressBar from "@/components/DownloadProgressBar";
 import KnowledgeLayers from "@/components/KnowledgeLayers";
 import MissingComponentModal from "@/components/MissingComponentModal";
+import TimelineFlowchart from "@/components/TimelineFlowchart";
+import TranscriptPanel from "@/components/TranscriptPanel";
 import VideoPlayer from "@/components/VideoPlayer";
 import {
   DownloadCancelledByUser,
@@ -53,7 +57,7 @@ import {
   VideoAnalysisResponse,
 } from "@/types/knowledge";
 
-type RightTab = "graph" | "layers" | "chat";
+type RightTab = "graph" | "flowchart" | "layers" | "transcript" | "chat";
 
 const LEVEL_LABELS: Record<UserLevel, string> = {
   beginner: "初學者",
@@ -910,6 +914,17 @@ export default function HomePage() {
                     觀念依賴圖
                   </button>
                   <button
+                    onClick={() => setViewMode("flowchart")}
+                    className={`text-xs px-3 py-1.5 rounded-md font-medium inline-flex items-center gap-1.5 cursor-pointer transition ${
+                      viewMode === "flowchart"
+                        ? "bg-blue-600 text-white"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+                    }`}
+                  >
+                    <Workflow className="w-3.5 h-3.5" />
+                    時序流程圖
+                  </button>
+                  <button
                     onClick={() => setViewMode("layers")}
                     className={`text-xs px-3 py-1.5 rounded-md font-medium inline-flex items-center gap-1.5 cursor-pointer transition ${
                       viewMode === "layers"
@@ -919,6 +934,17 @@ export default function HomePage() {
                   >
                     <Layers className="w-3.5 h-3.5" />
                     三層知識結構
+                  </button>
+                  <button
+                    onClick={() => setViewMode("transcript")}
+                    className={`text-xs px-3 py-1.5 rounded-md font-medium inline-flex items-center gap-1.5 cursor-pointer transition ${
+                      viewMode === "transcript"
+                        ? "bg-blue-600 text-white"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+                    }`}
+                  >
+                    <ScrollText className="w-3.5 h-3.5" />
+                    逐字稿
                   </button>
                   <button
                     onClick={() => setViewMode("chat")}
@@ -966,6 +992,12 @@ export default function HomePage() {
                     onAskInApp={handleAskInApp}
                     onOpenExternalGemini={handleOpenExternalGemini}
                   />
+                ) : viewMode === "flowchart" ? (
+                  <TimelineFlowchart
+                    data={analysis}
+                    onSeekVideo={handleSeekVideo}
+                    onAskInApp={handleAskInApp}
+                  />
                 ) : viewMode === "layers" ? (
                   <KnowledgeLayers
                     data={analysis}
@@ -974,6 +1006,17 @@ export default function HomePage() {
                     onSeekVideo={handleSeekVideo}
                     onAskInApp={handleAskInApp}
                     onOpenExternalGemini={handleOpenExternalGemini}
+                    onNotify={showToast}
+                  />
+                ) : viewMode === "transcript" ? (
+                  <TranscriptPanel
+                    data={analysis}
+                    apiKey={apiKey}
+                    onSeekVideo={handleSeekVideo}
+                    onTranscriptUpdated={(patch) =>
+                      setAnalysis((prev) => (prev ? { ...prev, ...patch } : prev))
+                    }
+                    onNotify={showToast}
                   />
                 ) : (
                   <DeepDiveChat

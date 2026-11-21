@@ -16,9 +16,13 @@ from pydantic import BaseModel, Field
 
 from schemas import (
     AnalyzeRequest,
+    ChapterItem,
     ChatRequest,
     ChatResponse,
     DownloadRequest,
+    TranscriptLine,
+    TranslateTranscriptRequest,
+    TranslateTranscriptResponse,
     VideoAnalysisResponse,
 )
 from services.gemini_service import (
@@ -28,6 +32,8 @@ from services.gemini_service import (
     chat_follow_up,
     has_configured_api_key,
     save_local_api_key,
+    to_traditional_chinese,
+    translate_transcript_lines_to_zh_tw,
     translate_transcript_to_zh_tw,
 )
 from services.history_service import (
@@ -36,6 +42,7 @@ from services.history_service import (
     list_history,
     save_history,
     update_history_state,
+    update_history_transcript,
 )
 from services.youtube_service import (
     DownloadCancelledError,
@@ -44,6 +51,7 @@ from services.youtube_service import (
     download_media,
     extract_audio_for_gemini,
     extract_video_id,
+    format_timestamp,
     format_transcript_as_srt,
     format_ytdlp_error,
     get_transcript,
@@ -95,6 +103,17 @@ def save_api_key(req: SaveKeyRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _snippets_to_lines(snippets: list[dict]) -> list[TranscriptLine]:
+    return [
+        TranscriptLine(
+            timestamp=format_timestamp(s["start"]),
+            seconds=max(0, int(s["start"])),
+            text=str(s["text"]),
+        )
+        for s in snippets
+    ]
+
+
 @app.post("/api/analyze", response_model=VideoAnalysisResponse)
 def analyze_video(req: AnalyzeRequest):
     try:
@@ -113,6 +132,7 @@ def analyze_video(req: AnalyzeRequest):
                 transcript_text=transcript.text,
                 level=req.level,
                 api_key_override=req.api_key,
+                chapters=meta.chapters,
             )
             source_label = transcript.source_label
             excerpt = transcript.text[:15_000]
@@ -124,6 +144,7 @@ def analyze_video(req: AnalyzeRequest):
                     youtube_url=canonical_url,
                     level=req.level,
                     api_key_override=req.api_key,
+                    chapters=meta.chapters,
                 )
                 source_label = "Gemini 直接解析 YouTube 影片"
                 excerpt = knowledge.video_summary_one_liner
@@ -138,6 +159,7 @@ def analyze_video(req: AnalyzeRequest):
                             audio_path=audio_path,
                             level=req.level,
                             api_key_override=req.api_key,
+                            chapters=meta.chapters,
                         )
                     source_label = "無字幕（由音訊直接解析）"
                     excerpt = knowledge.video_summary_one_liner
@@ -155,6 +177,19 @@ def analyze_video(req: AnalyzeRequest):
             detail=f"Gemini 分析失敗：{format_ytdlp_error(str(exc))}",
         ) from exc
 
+    transcript_lines = _snippets_to_lines(transcript.snippets) if transcript is not None else []
+    transcript_lang = transcript.language_code if transcript is not None else ""
+    transcript_zh_tw_lines: list[TranscriptLine] = []
+    if transcript is not None and transcript_lang.lower() in {"zh-tw", "zh-hant"}:
+        transcript_zh_tw_lines = [
+            TranscriptLine(
+                timestamp=line.timestamp,
+                seconds=line.seconds,
+                text=to_traditional_chinese(line.text),
+            )
+            for line in transcript_lines
+        ]
+
     result = VideoAnalysisResponse(
         video_id=meta.video_id,
         title=meta.title,
@@ -168,6 +203,10 @@ def analyze_video(req: AnalyzeRequest):
         extensions=knowledge.extensions,
         graph_edges=knowledge.graph_edges,
         transcript_excerpt=excerpt,
+        chapters=[ChapterItem(**ch) for ch in meta.chapters],
+        transcript_language=transcript_lang,
+        transcript_lines=transcript_lines,
+        transcript_zh_tw_lines=transcript_zh_tw_lines,
     )
     save_history(result.model_dump())
     return result
@@ -450,6 +489,65 @@ def download_transcript(req: TranscriptDownloadRequest):
         content=content.encode("utf-8-sig"),
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
+
+
+@app.post("/api/transcript/translate", response_model=TranslateTranscriptResponse)
+def translate_saved_transcript(req: TranslateTranscriptRequest):
+    try:
+        video_id = extract_video_id(req.video_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    record = get_history(video_id)
+    analysis = (record or {}).get("analysis", {})
+    orig_lines = analysis.get("transcript_lines") or []
+    zh_lines = analysis.get("transcript_zh_tw_lines") or []
+    lang = str(analysis.get("transcript_language") or "")
+
+    if zh_lines:
+        return TranslateTranscriptResponse(
+            video_id=video_id,
+            transcript_language=lang,
+            transcript_lines=[TranscriptLine(**item) for item in orig_lines],
+            transcript_zh_tw_lines=[TranscriptLine(**item) for item in zh_lines],
+            cached=True,
+        )
+
+    if not orig_lines:
+        transcript = get_transcript(video_id)
+        if transcript is None:
+            raise HTTPException(
+                status_code=404,
+                detail="此影片沒有提供文字字幕，無法取得逐字稿。",
+            )
+        orig_lines = [line.model_dump() for line in _snippets_to_lines(transcript.snippets)]
+        lang = transcript.language_code
+
+    try:
+        translated = translate_transcript_lines_to_zh_tw(
+            orig_lines,
+            language_code=lang,
+            api_key_override=req.api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"繁體中文轉換失敗：{exc}") from exc
+
+    update_history_transcript(
+        video_id=video_id,
+        transcript_lines=orig_lines,
+        transcript_zh_tw_lines=translated,
+        transcript_language=lang,
+    )
+
+    return TranslateTranscriptResponse(
+        video_id=video_id,
+        transcript_language=lang,
+        transcript_lines=[TranscriptLine(**item) for item in orig_lines],
+        transcript_zh_tw_lines=[TranscriptLine(**item) for item in translated],
+        cached=False,
     )
 
 

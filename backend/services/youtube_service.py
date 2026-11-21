@@ -6,7 +6,7 @@ import subprocess
 import sys
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, quote, urlparse
@@ -38,6 +38,7 @@ class VideoMetadata:
     title: str
     channel: str
     duration_seconds: int
+    chapters: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -180,8 +181,34 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _extract_chapters(raw_chapters: object) -> list[dict]:
+    """將 yt-dlp 回傳的 chapters 整理為標準化章節清單"""
+    if not isinstance(raw_chapters, list):
+        return []
+    chapters: list[dict] = []
+    for item in raw_chapters:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        start_seconds = max(0, int(float(item.get("start_time") or 0)))
+        end_raw = item.get("end_time")
+        end_seconds = max(start_seconds, int(float(end_raw))) if end_raw is not None else None
+        chapters.append(
+            {
+                "title": title,
+                "timestamp": format_timestamp(start_seconds),
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+            }
+        )
+    chapters.sort(key=lambda ch: ch["start_seconds"])
+    return chapters
+
+
 def get_video_metadata(url: str, video_id: str) -> VideoMetadata:
-    """透過 yt-dlp 取得影片標題、頻道與長度（失敗時以 YouTube oEmbed 備援）"""
+    """透過 yt-dlp 取得影片標題、頻道、長度與作者章節（失敗時以 YouTube oEmbed 備援）"""
     ydl_opts = _apply_ytdlp_cookie_opts(
         {
             "quiet": True,
@@ -197,6 +224,7 @@ def get_video_metadata(url: str, video_id: str) -> VideoMetadata:
                 title=info.get("title") or f"YouTube 影片 ({video_id})",
                 channel=info.get("uploader") or info.get("channel") or "未知頻道",
                 duration_seconds=int(info.get("duration") or 0),
+                chapters=_extract_chapters(info.get("chapters")),
             )
     except Exception:
         oembed = _fetch_oembed_metadata(url)

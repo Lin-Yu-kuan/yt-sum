@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -8,6 +10,11 @@ from google import genai
 from google.genai import types
 
 from schemas import ChatMessage, GeminiKnowledgeOutput
+
+try:
+    from opencc import OpenCC
+except ImportError:  # pragma: no cover - 執行環境未安裝時安全降級
+    OpenCC = None  # type: ignore[assignment]
 
 USER_CONFIG_DIR = Path.home() / ".yt-sum"
 USER_CONFIG_FILE = USER_CONFIG_DIR / "config.json"
@@ -25,8 +32,14 @@ LEVEL_INSTRUCTIONS = {
 }
 
 SYSTEM_PROMPT = """你是一位頂尖的知識架構師與學習導師，專門幫助學習者「真正看懂」YouTube 知識型與技術型影片。
-請勿只做流水帳式的章節摘要！你的任務是分析整部影片的知識依賴脈絡，並嚴格使用【台灣繁體中文】輸出以下三層結構：
+請勿只做流水帳式的章節摘要！你的任務是分析整部影片的知識依賴脈絡，並嚴格遵守以下語言與結構規範：
 
+【強制語言規範】
+- 無論影片原始語言是英文、簡體中文、日文或其他任何語言，所有 JSON 欄位內容一律必須使用【台灣繁體中文】（正體中文）撰寫，嚴禁出現任何簡體字。
+- 請採用台灣技術與日常慣用詞彙（例如：伺服器、軟體、影片、記憶體、資料庫、演算法、網路、程式、介面）。
+- 專有名詞可於繁體中文後方以括號保留英文原文（例如：「注意力機制 (Attention)」）。
+
+請輸出以下結構：
 1. **前置觀念（Prerequisites）**：
    - 找出「若不先懂這些觀念，直接看這部影片會聽不懂或一知半解」的關鍵概念（3~5個）。
    - 說明「為什麼看這部片前需要它」，並提供「1分鐘白話科普（含比喻）」。
@@ -40,6 +53,66 @@ SYSTEM_PROMPT = """你是一位頂尖的知識架構師與學習導師，專門�
 4. **觀念依賴連線（graph_edges）**：
    - 建立 `前置 id -> 核心 id` 與 `核心 id -> 延伸 id` 的合理依賴連線，方便視覺化呈現。
 """
+
+
+@lru_cache(maxsize=1)
+def _get_opencc():
+    if OpenCC is None:
+        return None
+    try:
+        return OpenCC("s2twp")
+    except Exception:
+        return None
+
+
+def to_traditional_chinese(text: str) -> str:
+    """將文字確定性轉換為台灣繁體中文與慣用語，避免模型混用簡體字"""
+    if not text:
+        return text
+    converter = _get_opencc()
+    if converter is None:
+        return text
+    return converter.convert(text)
+
+
+def normalize_knowledge_to_zh_tw(output: GeminiKnowledgeOutput) -> GeminiKnowledgeOutput:
+    """將解析結果中的所有文字欄位統一轉換為台灣繁體中文"""
+    return output.model_copy(
+        update={
+            "video_summary_one_liner": to_traditional_chinese(output.video_summary_one_liner),
+            "prerequisites": [
+                item.model_copy(
+                    update={
+                        "name": to_traditional_chinese(item.name),
+                        "why_needed": to_traditional_chinese(item.why_needed),
+                        "plain_explanation": to_traditional_chinese(item.plain_explanation),
+                    }
+                )
+                for item in output.prerequisites
+            ],
+            "core_concepts": [
+                item.model_copy(
+                    update={
+                        "title": to_traditional_chinese(item.title),
+                        "summary": to_traditional_chinese(item.summary),
+                        "example_in_video": to_traditional_chinese(item.example_in_video),
+                        "depends_on": [to_traditional_chinese(dep) for dep in item.depends_on],
+                    }
+                )
+                for item in output.core_concepts
+            ],
+            "extensions": [
+                item.model_copy(
+                    update={
+                        "title": to_traditional_chinese(item.title),
+                        "description": to_traditional_chinese(item.description),
+                        "suggested_prompt": to_traditional_chinese(item.suggested_prompt),
+                    }
+                )
+                for item in output.extensions
+            ],
+        }
+    )
 
 
 def load_local_api_key() -> str:
@@ -147,20 +220,38 @@ def _generate_with_fallback(
     raise RuntimeError("無法呼叫 Gemini 模型")
 
 
+def _format_chapters_context(chapters: list[dict] | None) -> str:
+    """將 YouTube 作者章節整理為精簡參考文字，協助第二層核心觀念對齊時間軸"""
+    if not chapters:
+        return ""
+    lines = [
+        f"- [{ch.get('timestamp', '00:00')}] {ch.get('title', '')}"
+        for ch in chapters[:40]
+        if ch.get("title")
+    ]
+    if not lines:
+        return ""
+    return "YouTube 作者劃分章節參考（請參考此時間軸對齊 core_concepts 時間點）：\n" + "\n".join(lines) + "\n\n"
+
+
 def analyze_transcript_with_gemini(
     video_title: str,
     transcript_text: str,
     level: Literal["beginner", "intermediate", "advanced"],
     api_key_override: str | None = None,
+    chapters: list[dict] | None = None,
 ) -> GeminiKnowledgeOutput:
     """使用逐字稿呼叫 Gemini 產出結構化三層知識"""
     client = _get_client(api_key_override)
 
     # 避免極長影片超出單次輸入建議上限，保留前 120,000 字元
     trimmed_transcript = transcript_text[:120_000]
+    chapters_hint = _format_chapters_context(chapters)
     prompt = (
         f"影片標題：{video_title}\n"
-        f"學習者背景設定：{LEVEL_INSTRUCTIONS[level]}\n\n"
+        f"學習者背景設定：{LEVEL_INSTRUCTIONS[level]}\n"
+        "請務必全程使用【台灣繁體中文】（正體中文）輸出所有欄位內容，嚴禁使用簡體中文。\n\n"
+        f"{chapters_hint}"
         f"以下是影片逐字稿（含時間戳記）：\n{trimmed_transcript}"
     )
 
@@ -175,9 +266,12 @@ def analyze_transcript_with_gemini(
         ),
     )
 
-    if response.parsed is not None:
-        return response.parsed
-    return GeminiKnowledgeOutput.model_validate_json(response.text)
+    parsed = (
+        response.parsed
+        if response.parsed is not None
+        else GeminiKnowledgeOutput.model_validate_json(response.text)
+    )
+    return normalize_knowledge_to_zh_tw(parsed)
 
 
 def analyze_youtube_url_with_gemini(
@@ -185,16 +279,19 @@ def analyze_youtube_url_with_gemini(
     youtube_url: str,
     level: Literal["beginner", "intermediate", "advanced"],
     api_key_override: str | None = None,
+    chapters: list[dict] | None = None,
 ) -> GeminiKnowledgeOutput:
     """當無法抓取字幕或本機 IP 受限時，直接將公開 YouTube 網址交由 Gemini 多模態解析"""
     client = _get_client(api_key_override)
 
+    chapters_hint = _format_chapters_context(chapters)
     prompt = (
         f"影片標題：{video_title}\n"
         f"學習者背景設定：{LEVEL_INSTRUCTIONS[level]}\n"
+        f"{chapters_hint}"
         "無法取得此影片的文字逐字稿（可能無字幕或本機受限），"
         "請直接觀看與聆聽這支 YouTube 影片的視訊與音訊內容，推估對應的時間點（`[mm:ss]` 與 `seconds`），"
-        "並嚴格按照系統指令產出三層知識結構。"
+        "並嚴格按照系統指令產出三層知識結構。所有輸出內容必須使用【台灣繁體中文】，嚴禁簡體中文。"
     )
     contents = types.Content(
         parts=[
@@ -212,9 +309,12 @@ def analyze_youtube_url_with_gemini(
             temperature=0.3,
         ),
     )
-    if response.parsed is not None:
-        return response.parsed
-    return GeminiKnowledgeOutput.model_validate_json(response.text)
+    parsed = (
+        response.parsed
+        if response.parsed is not None
+        else GeminiKnowledgeOutput.model_validate_json(response.text)
+    )
+    return normalize_knowledge_to_zh_tw(parsed)
 
 
 def analyze_audio_with_gemini(
@@ -222,17 +322,20 @@ def analyze_audio_with_gemini(
     audio_path: Path,
     level: Literal["beginner", "intermediate", "advanced"],
     api_key_override: str | None = None,
+    chapters: list[dict] | None = None,
 ) -> GeminiKnowledgeOutput:
     """無字幕備援：上傳音訊檔給 Gemini 進行多模態分析"""
     client = _get_client(api_key_override)
 
     uploaded = client.files.upload(file=str(audio_path))
     try:
+        chapters_hint = _format_chapters_context(chapters)
         prompt = (
             f"影片標題：{video_title}\n"
             f"學習者背景設定：{LEVEL_INSTRUCTIONS[level]}\n"
+            f"{chapters_hint}"
             "這部影片沒有提供文字字幕，請直接聆聽音訊內容，推估對應的時間點（秒數），"
-            "並嚴格按照系統指令產出三層知識結構。"
+            "並嚴格按照系統指令產出三層知識結構。所有輸出內容必須使用【台灣繁體中文】，嚴禁簡體中文。"
         )
         response = _generate_with_fallback(
             client=client,
@@ -244,9 +347,12 @@ def analyze_audio_with_gemini(
                 temperature=0.3,
             ),
         )
-        if response.parsed is not None:
-            return response.parsed
-        return GeminiKnowledgeOutput.model_validate_json(response.text)
+        parsed = (
+            response.parsed
+            if response.parsed is not None
+            else GeminiKnowledgeOutput.model_validate_json(response.text)
+        )
+        return normalize_knowledge_to_zh_tw(parsed)
     finally:
         try:
             client.files.delete(name=uploaded.name)
@@ -265,7 +371,8 @@ def chat_follow_up(
     client = _get_client(api_key_override)
 
     system = (
-        "你是一位親切且專業的學習導師，請使用台灣繁體中文回答使用者針對這部影片觀念的深入提問。"
+        "你是一位親切且專業的學習導師，請嚴格使用【台灣繁體中文】（正體中文與台灣慣用詞彙，嚴禁簡體中文）"
+        "回答使用者針對這部影片觀念的深入提問。"
         "回答請清晰有條理，善用白話比喻與具體例子，避免空泛。\n\n"
         f"目前研究的影片：{video_title}\n"
         f"影片脈絡參考：\n{video_context[:30_000]}"
@@ -285,7 +392,7 @@ def chat_follow_up(
             temperature=0.5,
         ),
     )
-    return response.text or "抱歉，暫時無法產生回覆，請再試一次。"
+    return to_traditional_chinese(response.text) if response.text else "抱歉，暫時無法產生回覆，請再試一次。"
 
 
 def translate_transcript_to_zh_tw(
@@ -308,4 +415,69 @@ def translate_transcript_to_zh_tw(
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.2),
     )
-    return (response.text or "").strip() or transcript_text
+    converted = to_traditional_chinese((response.text or "").strip())
+    return converted or to_traditional_chinese(transcript_text)
+
+
+_NUMBERED_LINE_RE = re.compile(r"^\[(\d+)\]\s*(.+)$")
+
+
+def translate_transcript_lines_to_zh_tw(
+    lines: list[dict],
+    language_code: str = "",
+    api_key_override: str | None = None,
+) -> list[dict]:
+    """將逐字稿行列表轉換／翻譯為台灣繁體中文，保留每行的時間軸與秒數"""
+    if not lines:
+        return []
+
+    lang = (language_code or "").lower()
+    # 簡體或繁體中文直接走本機 OpenCC 毫秒轉換，零 API 負擔
+    if lang.startswith("zh"):
+        return [
+            {
+                "timestamp": line["timestamp"],
+                "seconds": int(line["seconds"]),
+                "text": to_traditional_chinese(str(line.get("text") or "")),
+            }
+            for line in lines
+        ]
+
+    client = _get_client(api_key_override)
+    translated_texts: list[str] = [str(line.get("text") or "") for line in lines]
+    batch_size = 100
+
+    for start in range(0, len(lines), batch_size):
+        batch = lines[start : start + batch_size]
+        numbered_block = "\n".join(
+            f"[{idx}] {str(item.get('text') or '').replace(chr(10), ' ').strip()}"
+            for idx, item in enumerate(batch)
+        )
+        prompt = (
+            "請將以下帶編號的影片逐字稿逐行翻譯成自然流暢的【台灣繁體中文】（使用台灣慣用詞彙，嚴禁簡體字）。\n"
+            "規則：\n"
+            "1. 必須嚴格保留每行開頭的 `[編號]` 格式（例如 `[0] ...`），每行對應一行，不可合併或拆行。\n"
+            "2. 只輸出翻譯後的行內容，不要加任何說明或結語。\n\n"
+            f"{numbered_block}"
+        )
+        response = _generate_with_fallback(
+            client=client,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.2),
+        )
+        for raw_line in (response.text or "").splitlines():
+            m = _NUMBERED_LINE_RE.match(raw_line.strip())
+            if not m:
+                continue
+            rel_idx = int(m.group(1))
+            if 0 <= rel_idx < len(batch):
+                translated_texts[start + rel_idx] = to_traditional_chinese(m.group(2).strip())
+
+    return [
+        {
+            "timestamp": line["timestamp"],
+            "seconds": int(line["seconds"]),
+            "text": translated_texts[idx],
+        }
+        for idx, line in enumerate(lines)
+    ]

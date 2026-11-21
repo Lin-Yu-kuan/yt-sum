@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import {
+  Check,
   ChevronDown,
   ChevronUp,
   Compass,
@@ -11,6 +12,11 @@ import {
   Play,
   Sparkles,
 } from "lucide-react";
+import {
+  KnowledgeLayerKey,
+  buildLayerNotionMarkdown,
+  copyTextToClipboard,
+} from "@/lib/exportMarkdown";
 import { VideoAnalysisResponse } from "@/types/knowledge";
 
 interface KnowledgeLayersProps {
@@ -20,9 +26,16 @@ interface KnowledgeLayersProps {
   onSeekVideo: (seconds: number, label: string) => void;
   onAskInApp: (prompt: string) => void;
   onOpenExternalGemini: (topicTitle: string, prompt: string) => void;
+  onNotify?: (message: string) => void;
 }
 
-type LayerKey = "layer1" | "layer2" | "layer3";
+type LayerKey = KnowledgeLayerKey;
+
+const LAYER_LABELS: Record<LayerKey, string> = {
+  layer1: "第一層（掃雷區）",
+  layer2: "第二層（知識骨幹）",
+  layer3: "第三層（探索延伸）",
+};
 
 export default function KnowledgeLayers({
   data,
@@ -31,6 +44,7 @@ export default function KnowledgeLayers({
   onSeekVideo,
   onAskInApp,
   onOpenExternalGemini,
+  onNotify,
 }: KnowledgeLayersProps) {
   const [expandedPrereqs, setExpandedPrereqs] = useState<Set<string>>(() => {
     const first = data.prerequisites[0]?.id;
@@ -38,6 +52,68 @@ export default function KnowledgeLayers({
   });
 
   const [collapsedLayers, setCollapsedLayers] = useState<Set<LayerKey>>(new Set());
+  const [copiedLayer, setCopiedLayer] = useState<LayerKey | null>(null);
+
+  const handleCopyNotion = async (layer: LayerKey) => {
+    const md = buildLayerNotionMarkdown(data, layer, masteredIds);
+    const ok = await copyTextToClipboard(md);
+    if (ok) {
+      setCopiedLayer(layer);
+      onNotify?.(`已複製${LAYER_LABELS[layer]} Notion 筆記，可直接 Ctrl+V 貼上！`);
+      setTimeout(() => {
+        setCopiedLayer((curr) => (curr === layer ? null : curr));
+      }, 2000);
+    } else {
+      onNotify?.("複製失敗，請確認瀏覽器剪貼簿權限");
+    }
+  };
+
+  const renderLayerActions = (layer: LayerKey) => {
+    const isCopied = copiedLayer === layer;
+    const isCollapsed = collapsedLayers.has(layer);
+    return (
+      <div className="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={() => handleCopyNotion(layer)}
+          title="複製此層為 Notion 可直接貼上的 Markdown 筆記"
+          className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border transition cursor-pointer ${
+            isCopied
+              ? "border-emerald-500/40 bg-emerald-500/15 text-[var(--accent-emerald)]"
+              : "border-[var(--border-subtle)] bg-[var(--bg-page)] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:border-blue-500/50"
+          }`}
+        >
+          {isCopied ? (
+            <>
+              <Check className="w-3.5 h-3.5" />
+              已複製
+            </>
+          ) : (
+            <>
+              <Copy className="w-3.5 h-3.5" />
+              複製 Notion
+            </>
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => toggleLayer(layer)}
+          className="text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] inline-flex items-center gap-1 cursor-pointer px-1 py-1"
+        >
+          {isCollapsed ? (
+            <>
+              展開 <ChevronDown className="w-4 h-4" />
+            </>
+          ) : (
+            <>
+              收合 <ChevronUp className="w-4 h-4" />
+            </>
+          )}
+        </button>
+      </div>
+    );
+  };
 
   const toggleExpand = (id: string) => {
     setExpandedPrereqs((prev) => {
@@ -70,31 +146,21 @@ export default function KnowledgeLayers({
 
       {/* Layer 1: Prerequisites */}
       <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/40 p-3.5">
-        <button
-          type="button"
-          onClick={() => toggleLayer("layer1")}
-          className="w-full flex items-center justify-between gap-2 cursor-pointer"
-        >
-          <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 rounded text-xs font-semibold bg-rose-500/15 text-[var(--accent-rose)] border border-rose-500/30">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => toggleLayer("layer1")}
+            className="flex items-center gap-2 cursor-pointer text-left flex-1 min-w-0"
+          >
+            <span className="px-2 py-0.5 rounded text-xs font-semibold bg-rose-500/15 text-[var(--accent-rose)] border border-rose-500/30 shrink-0">
               第一層 · 掃雷區
             </span>
-            <h3 className="text-sm font-semibold text-left">
+            <h3 className="text-sm font-semibold text-left truncate">
               前置必備觀念（{data.prerequisites.length}）
             </h3>
-          </div>
-          <span className="text-xs text-[var(--text-muted)] inline-flex items-center gap-1">
-            {collapsedLayers.has("layer1") ? (
-              <>
-                展開 <ChevronDown className="w-4 h-4" />
-              </>
-            ) : (
-              <>
-                收合 <ChevronUp className="w-4 h-4" />
-              </>
-            )}
-          </span>
-        </button>
+          </button>
+          {renderLayerActions("layer1")}
+        </div>
 
         {!collapsedLayers.has("layer1") && (
           <div className="space-y-2.5 mt-3">
@@ -188,32 +254,22 @@ export default function KnowledgeLayers({
 
       {/* Layer 2: Core Concepts */}
       <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/40 p-3.5">
-        <button
-          type="button"
-          onClick={() => toggleLayer("layer2")}
-          className="w-full flex items-center justify-between gap-2 cursor-pointer"
-        >
-          <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 rounded text-xs font-semibold bg-blue-500/15 text-[var(--accent-blue)] border border-blue-500/30 inline-flex items-center gap-1">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => toggleLayer("layer2")}
+            className="flex items-center gap-2 cursor-pointer text-left flex-1 min-w-0"
+          >
+            <span className="px-2 py-0.5 rounded text-xs font-semibold bg-blue-500/15 text-[var(--accent-blue)] border border-blue-500/30 inline-flex items-center gap-1 shrink-0">
               <Layers className="w-3 h-3" />
               第二層 · 知識骨幹
             </span>
-            <h3 className="text-sm font-semibold text-left">
+            <h3 className="text-sm font-semibold text-left truncate">
               影片核心觀念拆解（{data.core_concepts.length}）
             </h3>
-          </div>
-          <span className="text-xs text-[var(--text-muted)] inline-flex items-center gap-1">
-            {collapsedLayers.has("layer2") ? (
-              <>
-                展開 <ChevronDown className="w-4 h-4" />
-              </>
-            ) : (
-              <>
-                收合 <ChevronUp className="w-4 h-4" />
-              </>
-            )}
-          </span>
-        </button>
+          </button>
+          {renderLayerActions("layer2")}
+        </div>
 
         {!collapsedLayers.has("layer2") && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
@@ -257,31 +313,21 @@ export default function KnowledgeLayers({
 
       {/* Layer 3: Extensions & Deep Dive */}
       <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/40 p-3.5">
-        <button
-          type="button"
-          onClick={() => toggleLayer("layer3")}
-          className="w-full flex items-center justify-between gap-2 cursor-pointer"
-        >
-          <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-500/15 text-[var(--accent-emerald)] border border-emerald-500/30">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => toggleLayer("layer3")}
+            className="flex items-center gap-2 cursor-pointer text-left flex-1 min-w-0"
+          >
+            <span className="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-500/15 text-[var(--accent-emerald)] border border-emerald-500/30 shrink-0">
               第三層 · 探索延伸
             </span>
-            <h3 className="text-sm font-semibold text-left">
+            <h3 className="text-sm font-semibold text-left truncate">
               觀念延伸與深入研究方向（{data.extensions.length}）
             </h3>
-          </div>
-          <span className="text-xs text-[var(--text-muted)] inline-flex items-center gap-1">
-            {collapsedLayers.has("layer3") ? (
-              <>
-                展開 <ChevronDown className="w-4 h-4" />
-              </>
-            ) : (
-              <>
-                收合 <ChevronUp className="w-4 h-4" />
-              </>
-            )}
-          </span>
-        </button>
+          </button>
+          {renderLayerActions("layer3")}
+        </div>
 
         {!collapsedLayers.has("layer3") && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
