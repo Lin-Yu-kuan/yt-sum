@@ -33,7 +33,7 @@ type LayerKey = KnowledgeLayerKey;
 
 const LAYER_LABELS: Record<LayerKey, string> = {
   layer1: "第一層（掃雷區）",
-  layer2: "第二層（知識骨幹）",
+  layer2: "第二層（影片摘要）",
   layer3: "第三層（探索延伸）",
 };
 
@@ -262,10 +262,10 @@ export default function KnowledgeLayers({
           >
             <span className="px-2 py-0.5 rounded text-xs font-semibold bg-blue-500/15 text-[var(--accent-blue)] border border-blue-500/30 inline-flex items-center gap-1 shrink-0">
               <Layers className="w-3 h-3" />
-              第二層 · 知識骨幹
+              第二層 · 影片摘要
             </span>
             <h3 className="text-sm font-semibold text-left truncate">
-              影片核心觀念拆解（{data.core_concepts.length}）
+              影片摘要（{data.core_concepts.length}）
             </h3>
           </button>
           {renderLayerActions("layer2")}
@@ -276,7 +276,7 @@ export default function KnowledgeLayers({
             {data.core_concepts.map((c) => (
               <div
                 key={c.id}
-                className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-page)] p-3.5 space-y-2 flex flex-col justify-between"
+                className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-page)] p-3.5 space-y-2"
               >
                 <div className="space-y-2">
                   <div className="flex items-start justify-between gap-2">
@@ -299,12 +299,6 @@ export default function KnowledgeLayers({
                     </p>
                   )}
                 </div>
-
-                {c.depends_on.length > 0 && (
-                  <div className="pt-2 border-t border-[var(--border-subtle)] text-xs text-[var(--text-muted)]">
-                    前置依賴：{c.depends_on.join("、")}
-                  </div>
-                )}
               </div>
             ))}
           </div>

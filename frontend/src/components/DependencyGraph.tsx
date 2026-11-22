@@ -74,7 +74,7 @@ export default function DependencyGraph({
         {/* Column 2: Core Concepts */}
         <div className="space-y-2 border-y md:border-y-0 md:border-x border-[var(--border-subtle)] py-3 md:py-0 md:px-4">
           <div className="text-xs font-semibold text-center text-[var(--accent-blue)] mb-2">
-            2. 影片核心 ➔
+            2. 影片摘要 ➔
           </div>
           {data.core_concepts.map((c) => (
             <button

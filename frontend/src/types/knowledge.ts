@@ -44,6 +44,19 @@ export interface TranscriptLine {
   text: string;
 }
 
+export interface ConceptGuideItem {
+  id: string;
+  title: string;
+  one_line_definition: string;
+  detailed_explanation: string;
+}
+
+export interface GenerateConceptGuidesResponse {
+  video_id: string;
+  concept_guides: ConceptGuideItem[];
+  cached: boolean;
+}
+
 export interface VideoAnalysisResponse {
   video_id: string;
   title: string;
@@ -61,6 +74,7 @@ export interface VideoAnalysisResponse {
   transcript_language?: string;
   transcript_lines?: TranscriptLine[];
   transcript_zh_tw_lines?: TranscriptLine[];
+  concept_guides?: ConceptGuideItem[];
 }
 
 export interface TranslateTranscriptResponse {
@@ -81,6 +95,9 @@ export interface HealthStatus {
   ffmpeg_available: boolean;
   gemini_key_configured: boolean;
   model: string;
+  frontend_build_id?: string;
+  backend_stale?: boolean;
+  backend_started_at?: string;
 }
 
 export interface HistorySummaryItem {

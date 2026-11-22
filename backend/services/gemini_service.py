@@ -9,7 +9,13 @@ from typing import Literal
 from google import genai
 from google.genai import types
 
-from schemas import ChatMessage, GeminiKnowledgeOutput, GeminiTranscriptOutput
+from schemas import (
+    ChatMessage,
+    ConceptGuideItem,
+    GeminiConceptGuidesOutput,
+    GeminiKnowledgeOutput,
+    GeminiTranscriptOutput,
+)
 
 try:
     from opencc import OpenCC
@@ -44,10 +50,10 @@ SYSTEM_PROMPT = """你是一位頂尖的知識架構師與學習導師，專門�
 1. **前置觀念（Prerequisites）**：
    - 找出「若不先懂這些觀念，直接看這部影片會聽不懂或一知半解」的關鍵概念（3~5個）。
    - 說明「為什麼看這部片前需要它」，並提供「1分鐘白話科普（含比喻）」。
-2. **影片核心觀念（Core Concepts）**：
-   - 按時間軸拆解影片真正講述的知識骨幹（3~7個）。
+2. **影片摘要（Core Concepts）**：
+   - 按時間軸拆解並摘要影片各段講述的核心重點（3~7個）。
    - 附上準確的 `[mm:ss]` 時間點與總秒數 `seconds`，以及影片中的實例。
-   - `depends_on` 填入這個觀念依賴哪些前置觀念或前一個核心觀念的名稱。
+   - `depends_on` 填入這個觀念依賴哪些前置觀念或前一個觀念的名稱（供關聯圖使用）。
 3. **延伸與深入研究（Extensions & Deep Dive）**：
    - 分為 `vertical`（縱向深究：底層原理、常見迷思、極限條件）與 `horizontal`（橫向延伸：跨領域應用、下一步學習路線）。
    - 每個項目都要附帶一個具體、高品質的 `suggested_prompt`，方便使用者一鍵發問深入研究。
@@ -583,3 +589,102 @@ def translate_transcript_lines_to_zh_tw(
         }
         for idx, line in enumerate(lines)
     ]
+
+
+CONCEPT_GUIDES_SYSTEM_PROMPT = """你是一位頂尖的知識架構師與學習導師。
+使用者已經看過影片的時間軸摘要，現在他需要的是「跳脫影片時間順序與章節切分限制」的【觀念解說】。
+請綜觀整支影片真正想傳達的核心思想、原理或關鍵概念，將散落在影片各處的線索重新整合，提煉出 3~6 個最重要、值得獨立理解的觀念。
+
+【強制語言與格式規範】
+- 所有內容一律使用【台灣繁體中文】（正體中文與台灣慣用詞彙，嚴禁簡體中文）。
+- 專有名詞可於繁體中文後方以括號保留英文原文（例如：「注意力機制 (Attention)」）。
+- `one_line_definition`：一句話精準定義這個觀念的核心本質。
+- `detailed_explanation`：不受影片敘事順序限制，依影片本身的領域與主題性質，自由組織邏輯連貫的完整系統化解說（可用空行分段，讓閱讀舒適清楚，但請勿使用雜亂的 `**`、`##` 等原始 Markdown 語法）。"""
+
+
+def normalize_concept_guides_to_zh_tw(
+    guides: list[ConceptGuideItem],
+) -> list[ConceptGuideItem]:
+    """將觀念解說列表中的所有文字欄位轉換為台灣繁體中文"""
+    return [
+        item.model_copy(
+            update={
+                "title": to_traditional_chinese(item.title),
+                "one_line_definition": to_traditional_chinese(item.one_line_definition),
+                "detailed_explanation": to_traditional_chinese(item.detailed_explanation),
+            }
+        )
+        for item in guides
+    ]
+
+
+def generate_concept_guides_with_gemini(
+    video_title: str,
+    context_text: str,
+    level: Literal["beginner", "intermediate", "advanced"] = "intermediate",
+    api_key_override: str | None = None,
+) -> list[ConceptGuideItem]:
+    """依據影片逐字稿或脈絡，生成跳脫時間軸限制的完整觀念解說"""
+    client = _get_client(api_key_override)
+    prompt = (
+        f"影片標題：{video_title}\n"
+        f"學習者背景設定：{LEVEL_INSTRUCTIONS.get(level, LEVEL_INSTRUCTIONS['intermediate'])}\n"
+        "請跳脫影片時間順序，綜觀以下全片內容與脈絡，整理出整支影片想傳達的核心「觀念解說」。\n\n"
+        f"{context_text[:120_000]}"
+    )
+    response = _generate_with_fallback(
+        client=client,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=CONCEPT_GUIDES_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=GeminiConceptGuidesOutput,
+            temperature=0.35,
+        ),
+    )
+    parsed = (
+        response.parsed
+        if response.parsed is not None
+        else GeminiConceptGuidesOutput.model_validate_json(response.text)
+    )
+    return normalize_concept_guides_to_zh_tw(parsed.concept_guides)
+
+
+def generate_concept_guides_from_youtube_url(
+    video_title: str,
+    youtube_url: str,
+    level: Literal["beginner", "intermediate", "advanced"] = "intermediate",
+    api_key_override: str | None = None,
+    summary_hint: str = "",
+) -> list[ConceptGuideItem]:
+    """無逐字稿時的備援：直接請 Gemini 觀看 YouTube 影片生成完整觀念解說"""
+    client = _get_client(api_key_override)
+    hint_block = f"\n既有影片摘要參考：\n{summary_hint[:10_000]}\n" if summary_hint else ""
+    prompt = (
+        f"影片標題：{video_title}\n"
+        f"學習者背景設定：{LEVEL_INSTRUCTIONS.get(level, LEVEL_INSTRUCTIONS['intermediate'])}\n"
+        f"{hint_block}"
+        "請直接觀看與聆聽這支 YouTube 影片，跳脫時間軸與章節順序，綜觀整支影片想傳達的核心思想，整理出 3~6 個完整的「觀念解說」。"
+    )
+    contents = types.Content(
+        parts=[
+            types.Part(file_data=types.FileData(file_uri=youtube_url)),
+            types.Part.from_text(text=prompt),
+        ]
+    )
+    response = _generate_with_fallback(
+        client=client,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=CONCEPT_GUIDES_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=GeminiConceptGuidesOutput,
+            temperature=0.35,
+        ),
+    )
+    parsed = (
+        response.parsed
+        if response.parsed is not None
+        else GeminiConceptGuidesOutput.model_validate_json(response.text)
+    )
+    return normalize_concept_guides_to_zh_tw(parsed.concept_guides)

@@ -1,5 +1,6 @@
 import {
   ChatMessage,
+  GenerateConceptGuidesResponse,
   HealthStatus,
   HistorySummaryItem,
   SavedHistoryRecord,
@@ -30,9 +31,16 @@ async function parseError(res: Response): Promise<string> {
 }
 
 export async function fetchHealth(): Promise<HealthStatus> {
-  const res = await fetch(`${getApiBase()}/api/health`);
+  const res = await fetch(`${getApiBase()}/api/health`, { cache: "no-store" });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
+}
+
+export async function requestBackendRestart(): Promise<void> {
+  const res = await fetch(`${getApiBase()}/api/system/restart`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await parseError(res));
 }
 
 export async function saveApiKeyToLocal(apiKey: string): Promise<void> {
@@ -300,6 +308,24 @@ export async function transcribeTranscript(params: {
     body: JSON.stringify({
       video_id: params.videoId,
       api_key: params.apiKey?.trim() || null,
+    }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
+
+export async function generateConceptGuides(params: {
+  videoId: string;
+  apiKey?: string;
+  force?: boolean;
+}): Promise<GenerateConceptGuidesResponse> {
+  const res = await fetch(`${getApiBase()}/api/concepts/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      video_id: params.videoId,
+      api_key: params.apiKey?.trim() || null,
+      force: Boolean(params.force),
     }),
   });
   if (!res.ok) throw new Error(await parseError(res));

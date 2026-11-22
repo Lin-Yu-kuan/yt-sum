@@ -23,8 +23,22 @@ export default function PwaInstallButton() {
       (window.navigator as { standalone?: boolean }).standalone === true;
     setIsStandalone(standalone);
 
+    let swReg: ServiceWorkerRegistration | null = null;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && swReg) {
+        swReg.update().catch(() => {});
+      }
+    };
+
     if (window.location.port !== "3000" && "serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
+      navigator.serviceWorker
+        .register("/sw.js")
+        .then((reg) => {
+          swReg = reg;
+          reg.update().catch(() => {});
+        })
+        .catch(() => {});
+      document.addEventListener("visibilitychange", handleVisibilityChange);
     }
 
     const ua = navigator.userAgent;
@@ -49,6 +63,7 @@ export default function PwaInstallButton() {
     return () => {
       window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
       window.removeEventListener("appinstalled", handleAppInstalled);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 

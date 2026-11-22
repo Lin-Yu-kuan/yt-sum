@@ -1,8 +1,13 @@
+import hashlib
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -19,7 +24,10 @@ from schemas import (
     ChapterItem,
     ChatRequest,
     ChatResponse,
+    ConceptGuideItem,
     DownloadRequest,
+    GenerateConceptGuidesRequest,
+    GenerateConceptGuidesResponse,
     TranscriptLine,
     TranscribeTranscriptRequest,
     TranslateTranscriptRequest,
@@ -31,6 +39,8 @@ from services.gemini_service import (
     analyze_transcript_with_gemini,
     analyze_youtube_url_with_gemini,
     chat_follow_up,
+    generate_concept_guides_from_youtube_url,
+    generate_concept_guides_with_gemini,
     has_configured_api_key,
     save_local_api_key,
     to_traditional_chinese,
@@ -44,6 +54,7 @@ from services.history_service import (
     get_history,
     list_history,
     save_history,
+    update_history_concept_guides,
     update_history_state,
     update_history_transcript,
 )
@@ -85,9 +96,66 @@ app.add_middleware(
 @app.middleware("http")
 async def pwa_cache_headers(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path in ("/sw.js", "/manifest.json"):
-        response.headers["Cache-Control"] = "no-cache"
+    if request.url.path in ("/", "/index.html", "/sw.js", "/manifest.json", "/build-id.txt"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
     return response
+
+
+def _compute_backend_fingerprint() -> dict[str, tuple[int, int]]:
+    """掃描後端 Python 原始碼的修改時間與大小，用於偵測程式碼是否已更新"""
+    fingerprint: dict[str, tuple[int, int]] = {}
+    targets = list(BASE_DIR.glob("*.py")) + list((BASE_DIR / "services").glob("*.py"))
+    for p in targets:
+        try:
+            st = p.stat()
+            fingerprint[str(p)] = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            continue
+    return fingerprint
+
+
+STARTUP_BACKEND_FINGERPRINT = _compute_backend_fingerprint()
+BACKEND_STARTED_AT = datetime.now(timezone.utc).isoformat()
+
+
+def _is_backend_stale() -> bool:
+    return _compute_backend_fingerprint() != STARTUP_BACKEND_FINGERPRINT
+
+
+def _get_frontend_build_id() -> str:
+    """讀取最新建置的前端版本指紋"""
+    out_dir = BASE_DIR.parent / "frontend" / "out"
+    build_id_file = out_dir / "build-id.txt"
+    if build_id_file.exists():
+        try:
+            val = build_id_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except OSError:
+            pass
+    index_file = out_dir / "index.html"
+    if index_file.exists():
+        try:
+            return hashlib.sha256(index_file.read_bytes()).hexdigest()[:12]
+        except OSError:
+            pass
+    return ""
+
+
+def _spawn_detached_restart() -> None:
+    """延遲釋放 port 後以無黑框方式重新啟動新版 Uvicorn 服務"""
+    helper_code = (
+        "import os, subprocess, sys, time; "
+        "time.sleep(0.6); "
+        "kwargs = {'cwd': sys.argv[1], 'close_fds': True}; "
+        "kwargs['creationflags'] = 0x08000000 | 0x00000200 if os.name == 'nt' else 0; "
+        "subprocess.Popen([sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000', '--no-use-colors'], **kwargs)"
+    )
+    popen_kwargs: dict = {"cwd": str(BASE_DIR), "close_fds": True}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = 0x08000000 | 0x00000200
+    subprocess.Popen([sys.executable, "-c", helper_code, str(BASE_DIR)], **popen_kwargs)
 
 
 class SaveKeyRequest(BaseModel):
@@ -102,7 +170,28 @@ def health_check():
         "gemini_key_configured": has_configured_api_key(),
         "cookies_configured": has_configured_cookies(),
         "model": os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+        "frontend_build_id": _get_frontend_build_id(),
+        "backend_stale": _is_backend_stale(),
+        "backend_started_at": BACKEND_STARTED_AT,
     }
+
+
+@app.post("/api/system/restart")
+def restart_local_backend(request: Request):
+    """僅限本機呼叫的平滑自我重啟端點，供偵測到程式碼更新時無感重啟"""
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise HTTPException(status_code=403, detail="僅限本機請求執行重啟")
+
+    def _do_restart():
+        time.sleep(0.3)
+        try:
+            _spawn_detached_restart()
+        finally:
+            os._exit(0)
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return {"status": "restarting"}
 
 
 @app.post("/api/config/key")
@@ -767,6 +856,105 @@ def translate_saved_transcript(req: TranslateTranscriptRequest):
         transcript_language=lang,
         transcript_lines=[TranscriptLine(**item) for item in orig_lines],
         transcript_zh_tw_lines=[TranscriptLine(**item) for item in translated],
+        cached=False,
+    )
+
+
+@app.post("/api/concepts/generate", response_model=GenerateConceptGuidesResponse)
+def generate_concept_guides_endpoint(req: GenerateConceptGuidesRequest):
+    """綜觀整支影片按需生成「觀念解說」並快取回本機歷史紀錄"""
+    try:
+        video_id = extract_video_id(req.video_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    record = get_history(video_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="找不到此影片的保存紀錄")
+
+    analysis = record.get("analysis", {})
+    existing_guides = analysis.get("concept_guides") or []
+    if existing_guides and not req.force:
+        return GenerateConceptGuidesResponse(
+            video_id=video_id,
+            concept_guides=[ConceptGuideItem(**item) for item in existing_guides],
+            cached=True,
+        )
+
+    video_title = str(analysis.get("title") or video_id)
+    level = analysis.get("level") or "intermediate"
+    if level not in ("beginner", "intermediate", "advanced"):
+        level = "intermediate"
+
+    # 組合全片脈絡：優先使用完整逐字稿，輔以一句話總結與既有分段摘要
+    summary_parts: list[str] = []
+    if analysis.get("video_summary_one_liner"):
+        summary_parts.append(f"一句話總結：{analysis['video_summary_one_liner']}")
+    core_concepts = analysis.get("core_concepts") or []
+    if core_concepts:
+        bullets = "\n".join(
+            f"- {c.get('title', '')}：{c.get('summary', '')}"
+            for c in core_concepts
+            if isinstance(c, dict)
+        )
+        summary_parts.append(f"分段摘要參考：\n{bullets}")
+    summary_hint = "\n\n".join(summary_parts)
+
+    transcript_lines = analysis.get("transcript_lines") or []
+    transcript_text = (
+        _lines_to_plain_text(transcript_lines)
+        if transcript_lines
+        else str(analysis.get("transcript_excerpt") or "").strip()
+    )
+
+    try:
+        if transcript_text and len(transcript_text) > 120:
+            context_text = (
+                f"{summary_hint}\n\n影片逐字稿內容：\n{transcript_text}"
+                if summary_hint
+                else f"影片逐字稿內容：\n{transcript_text}"
+            )
+            guides = generate_concept_guides_with_gemini(
+                video_title=video_title,
+                context_text=context_text,
+                level=level,
+                api_key_override=req.api_key,
+            )
+        else:
+            canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+            try:
+                guides = generate_concept_guides_from_youtube_url(
+                    video_title=video_title,
+                    youtube_url=canonical_url,
+                    level=level,
+                    api_key_override=req.api_key,
+                    summary_hint=summary_hint,
+                )
+            except ValueError:
+                raise
+            except Exception:
+                if not summary_hint:
+                    raise
+                guides = generate_concept_guides_with_gemini(
+                    video_title=video_title,
+                    context_text=summary_hint,
+                    level=level,
+                    api_key_override=req.api_key,
+                )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"觀念解說生成失敗：{format_ytdlp_error(str(exc))}",
+        ) from exc
+
+    guide_dicts = [item.model_dump() for item in guides]
+    update_history_concept_guides(video_id, guide_dicts)
+
+    return GenerateConceptGuidesResponse(
+        video_id=video_id,
+        concept_guides=guides,
         cached=False,
     )
 

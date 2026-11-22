@@ -1,4 +1,4 @@
-const CACHE_NAME = "yt-sum-static-v3";
+const CACHE_NAME = "yt-sum-static-v4";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -19,6 +19,14 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "CLEAR_CACHES") {
+    event.waitUntil(
+      caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+    );
+  }
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;
@@ -27,8 +35,14 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
 
+  const isHtmlNav =
+    request.mode === "navigate" ||
+    url.pathname === "/" ||
+    url.pathname === "/index.html" ||
+    url.pathname === "/build-id.txt";
+
   event.respondWith(
-    fetch(request)
+    (isHtmlNav ? fetch(request, { cache: "no-store" }) : fetch(request))
       .then((response) => {
         if (response && response.ok && response.type === "basic") {
           const cloned = response.clone();

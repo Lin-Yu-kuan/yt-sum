@@ -899,3 +899,151 @@ def test_terminate_process_tree_handles_none():
     from services.youtube_service import terminate_process_tree
 
     terminate_process_tree(None)
+
+
+def test_generate_concept_guides_caches_and_normalizes_zh_tw(tmp_path, monkeypatch):
+    import main as main_module
+    from schemas import ConceptGuideItem
+
+    hist_dir = tmp_path / "history"
+    monkeypatch.setattr(history_service, "HISTORY_DIR", hist_dir)
+
+    video_id = "dQw4w9WgXcQ"
+    history_service.save_history(
+        {
+            "video_id": video_id,
+            "title": "測試伺服器架構影片",
+            "channel": "Test",
+            "duration_seconds": 300,
+            "transcript_source": "zh-TW",
+            "level": "intermediate",
+            "video_summary_one_liner": "介紹核心架構。",
+            "prerequisites": [],
+            "core_concepts": [
+                {
+                    "id": "c1",
+                    "title": "快取機制",
+                    "timestamp": "01:00",
+                    "seconds": 60,
+                    "summary": "說明記憶體快取。",
+                    "example_in_video": "Redis 實例",
+                    "depends_on": [],
+                }
+            ],
+            "extensions": [],
+            "graph_edges": [],
+            "transcript_excerpt": (
+                "這是一段超過一百二十個字元的完整逐字稿脈絡內容，用來測試觀念解說生成端點會優先採用逐字稿與摘要整合生成，"
+                "並確保所有簡體字彙都能被正確轉換為台灣繁體中文與慣用語。記憶體與伺服器快取是系統效能優化的關鍵核心，"
+                "透過減少磁碟隨機存取，可以讓整體架構的延遲大幅降低。"
+            ),
+            "transcript_lines": [],
+            "transcript_zh_tw_lines": [],
+        }
+    )
+
+    call_count = 0
+
+    def fake_generate(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return gemini_service.normalize_concept_guides_to_zh_tw(
+            [
+                ConceptGuideItem(
+                    id="g1",
+                    title="服务器内存快取",
+                    one_line_definition="把常用数据暂时放在内存以加速读取。",
+                    detailed_explanation="本视频从头到尾透过不同案例说明软件如何管理内存，避免频繁读写磁盘。",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(main_module, "generate_concept_guides_with_gemini", fake_generate)
+    monkeypatch.setattr(
+        main_module,
+        "generate_concept_guides_from_youtube_url",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("不應走 YouTube URL 備援")),
+    )
+
+    # 首次呼叫：生成並寫入快取
+    res1 = client.post("/api/concepts/generate", json={"video_id": video_id})
+    assert res1.status_code == 200
+    body1 = res1.json()
+    assert body1["cached"] is False
+    assert call_count == 1
+    assert len(body1["concept_guides"]) == 1
+    assert "伺服器" in body1["concept_guides"][0]["title"]
+    assert "記憶體" in body1["concept_guides"][0]["one_line_definition"]
+    assert "影片" in body1["concept_guides"][0]["detailed_explanation"]
+    assert "磁碟" in body1["concept_guides"][0]["detailed_explanation"]
+
+    # 二次呼叫：直接命中快取，不重打 Gemini
+    res2 = client.post("/api/concepts/generate", json={"video_id": video_id})
+    assert res2.status_code == 200
+    assert res2.json()["cached"] is True
+    assert call_count == 1
+
+    # force=True：強制重新生成
+    res3 = client.post("/api/concepts/generate", json={"video_id": video_id, "force": True})
+    assert res3.status_code == 200
+    assert res3.json()["cached"] is False
+    assert call_count == 2
+
+    # 歷史詳細紀錄應已持久化 concept_guides
+    saved = client.get(f"/api/history/{video_id}").json()
+    assert len(saved["analysis"]["concept_guides"]) == 1
+
+
+def test_health_includes_version_and_no_store_headers(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_get_frontend_build_id", lambda: "testbuild123")
+    res = client.get("/api/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["frontend_build_id"] == "testbuild123"
+    assert isinstance(body["backend_stale"], bool)
+    assert isinstance(body["backend_started_at"], str)
+
+    monkeypatch.setattr(main_module, "_is_backend_stale", lambda: True)
+    assert client.get("/api/health").json()["backend_stale"] is True
+
+    sw_res = client.get("/sw.js")
+    assert "no-store" in sw_res.headers.get("cache-control", "").lower()
+
+
+def test_system_restart_localhost_only(monkeypatch):
+    import main as main_module
+
+    remote_client = TestClient(app, client=("10.0.0.8", 54321))
+    assert remote_client.post("/api/system/restart").status_code == 403
+
+    called = {"spawned": False, "exited": False}
+    monkeypatch.setattr(
+        main_module,
+        "_spawn_detached_restart",
+        lambda: called.__setitem__("spawned", True),
+    )
+    monkeypatch.setattr(
+        main_module.os,
+        "_exit",
+        lambda code: called.__setitem__("exited", True),
+    )
+    monkeypatch.setattr(main_module.time, "sleep", lambda _: None)
+
+    class ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            if self._target:
+                self._target()
+
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    local_client = TestClient(app, client=("127.0.0.1", 54321))
+    res = local_client.post("/api/system/restart")
+    assert res.status_code == 200
+    assert res.json()["status"] == "restarting"
+    assert called["spawned"] is True
+    assert called["exited"] is True

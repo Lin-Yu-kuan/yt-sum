@@ -115,6 +115,21 @@ def _normalize_analysis_to_zh_tw(analysis: dict) -> dict:
             for ch in normalized["chapters"]
         ]
 
+    if isinstance(normalized.get("concept_guides"), list):
+        normalized["concept_guides"] = [
+            {
+                **item,
+                **{
+                    k: to_traditional_chinese(item[k])
+                    for k in ("title", "one_line_definition", "detailed_explanation")
+                    if isinstance(item.get(k), str)
+                },
+            }
+            if isinstance(item, dict)
+            else item
+            for item in normalized["concept_guides"]
+        ]
+
     return normalized
 
 
@@ -218,6 +233,21 @@ def update_history_transcript(
         analysis["transcript_excerpt"] = transcript_excerpt
     if transcript_source is not None:
         analysis["transcript_source"] = transcript_source
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
+
+
+def update_history_concept_guides(
+    video_id: str,
+    concept_guides: list[dict],
+) -> bool:
+    """將按需生成的觀念解說快取寫回本機歷史紀錄"""
+    path = _safe_video_path(video_id)
+    if not path.exists():
+        return False
+    data = json.loads(path.read_text(encoding="utf-8"))
+    analysis = data.setdefault("analysis", {})
+    analysis["concept_guides"] = concept_guides
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return True
 

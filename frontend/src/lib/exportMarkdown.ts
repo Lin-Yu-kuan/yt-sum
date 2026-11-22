@@ -1,4 +1,4 @@
-import { VideoAnalysisResponse } from "@/types/knowledge";
+import { ConceptGuideItem, VideoAnalysisResponse } from "@/types/knowledge";
 
 export function buildMarkdownNote(data: VideoAnalysisResponse): string {
   const lines: string[] = [
@@ -23,14 +23,11 @@ export function buildMarkdownNote(data: VideoAnalysisResponse): string {
     lines.push("");
   }
 
-  lines.push("---", "", "## 第二層：影片核心觀念（Core Concepts）", "");
+  lines.push("---", "", "## 第二層：影片摘要", "");
   for (const c of data.core_concepts) {
     lines.push(`### ${c.title} (\`${c.timestamp}\`)`);
-    lines.push(`- **核心拆解**：${c.summary}`);
+    lines.push(`- **重點摘要**：${c.summary}`);
     lines.push(`- **影片實例**：${c.example_in_video}`);
-    if (c.depends_on.length > 0) {
-      lines.push(`- **前置依賴**：${c.depends_on.join("、")}`);
-    }
     lines.push("");
   }
 
@@ -54,6 +51,17 @@ export function buildMarkdownNote(data: VideoAnalysisResponse): string {
       lines.push(`  - *建議提問*：\`${h.suggested_prompt}\``);
     }
     lines.push("");
+  }
+
+  if (data.concept_guides && data.concept_guides.length > 0) {
+    lines.push("---", "", "## 觀念解說（全片概念整合）", "");
+    data.concept_guides.forEach((g, idx) => {
+      lines.push(`### ${idx + 1}. ${g.title}`);
+      lines.push(`> **一句話精準定義**：${g.one_line_definition}`);
+      lines.push("");
+      lines.push(g.detailed_explanation);
+      lines.push("");
+    });
   }
 
   return lines.join("\n");
@@ -87,7 +95,7 @@ export function buildLayerNotionMarkdown(
 
   if (layer === "layer2") {
     lines.push(
-      `## 🧠 第二層：影片核心觀念拆解（知識骨幹）`,
+      `## 📝 第二層：影片摘要`,
       `> 📺 來源影片：[${data.title}](${videoUrl})（${data.channel}）`,
       `> 💡 一句話總結：${data.video_summary_one_liner}`,
       ""
@@ -95,12 +103,9 @@ export function buildLayerNotionMarkdown(
     data.core_concepts.forEach((c, idx) => {
       const timeUrl = `${videoUrl}&t=${Math.max(0, Math.floor(c.seconds))}s`;
       lines.push(`### ${idx + 1}. ${c.title}（[${c.timestamp}](${timeUrl})）`);
-      lines.push(`- **核心拆解**：${c.summary}`);
+      lines.push(`- **重點摘要**：${c.summary}`);
       if (c.example_in_video) {
         lines.push(`- **影片實例**：${c.example_in_video}`);
-      }
-      if (c.depends_on.length > 0) {
-        lines.push(`- **前置依賴**：${c.depends_on.join("、")}`);
       }
       lines.push("");
     });
@@ -132,6 +137,33 @@ export function buildLayerNotionMarkdown(
     }
     lines.push("");
   }
+
+  return lines.join("\n").trimEnd();
+}
+
+export function buildConceptGuidesNotionMarkdown(
+  data: VideoAnalysisResponse,
+  singleGuide?: ConceptGuideItem
+): string {
+  const videoUrl = `https://www.youtube.com/watch?v=${data.video_id}`;
+  const guides = singleGuide ? [singleGuide] : data.concept_guides ?? [];
+  const lines: string[] = [
+    singleGuide
+      ? `## 💡 觀念解說：${singleGuide.title}`
+      : `## 💡 觀念解說（全片概念整合）`,
+    `> 📺 來源影片：[${data.title}](${videoUrl})（${data.channel}）`,
+    "",
+  ];
+
+  guides.forEach((g, idx) => {
+    if (!singleGuide) {
+      lines.push(`### ${idx + 1}. ${g.title}`);
+    }
+    lines.push(`> **一句話精準定義**：${g.one_line_definition}`);
+    lines.push("");
+    lines.push(g.detailed_explanation);
+    lines.push("");
+  });
 
   return lines.join("\n").trimEnd();
 }

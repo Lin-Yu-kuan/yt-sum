@@ -101,6 +101,9 @@ class VideoAnalysisResponse(BaseModel):
     transcript_zh_tw_lines: list[TranscriptLine] = Field(
         default_factory=list, description="繁體中文逐字稿行列表（按需翻譯後快取）"
     )
+    concept_guides: list[ConceptGuideItem] = Field(
+        default_factory=list, description="綜觀整支影片的主題式觀念解說（按需生成後快取）"
+    )
 
 
 class TranslateTranscriptRequest(BaseModel):
@@ -136,6 +139,38 @@ class TranslateTranscriptResponse(BaseModel):
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
+
+
+class ConceptGuideItem(BaseModel):
+    """綜觀整支影片後的主題式完整觀念解說（不受影片時間順序限制）"""
+    id: str = Field(description="唯一識別碼，例如 g1, g2")
+    title: str = Field(description="觀念名稱（必須使用台灣繁體中文，可於括號附英文專有名詞）")
+    one_line_definition: str = Field(
+        description="一句話精準定義此觀念（必須使用台灣繁體中文，嚴禁簡體中文）"
+    )
+    detailed_explanation: str = Field(
+        description="不受影片時間順序與章節切分限制的完整系統化解說。依影片主題性質自由組織段落與闡述方式，將散落於整支影片的相關資訊整合成獨立可讀的深度解說（必須使用台灣繁體中文，嚴禁簡體中文，使用清楚的分段純文字，避免雜亂的原始 Markdown 符號）"
+    )
+
+
+class GeminiConceptGuidesOutput(BaseModel):
+    """Gemini 按需生成的觀念解說列表"""
+    concept_guides: list[ConceptGuideItem] = Field(
+        default_factory=list,
+        description="3~6 個綜觀整支影片後想傳達的核心觀念完整解說",
+    )
+
+
+class GenerateConceptGuidesRequest(BaseModel):
+    video_id: str
+    api_key: str | None = None
+    force: bool = False
+
+
+class GenerateConceptGuidesResponse(BaseModel):
+    video_id: str
+    concept_guides: list[ConceptGuideItem] = Field(default_factory=list)
+    cached: bool = False
 
 
 class ChatRequest(BaseModel):

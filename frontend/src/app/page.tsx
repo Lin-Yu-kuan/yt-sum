@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
+  BookOpen,
   Clock,
   FileDown,
   FileText,
@@ -26,6 +27,7 @@ import {
   Youtube,
 } from "lucide-react";
 import ConfirmModal from "@/components/ConfirmModal";
+import ConceptGuidePanel from "@/components/ConceptGuidePanel";
 import DeepDiveChat from "@/components/DeepDiveChat";
 import DependencyGraph from "@/components/DependencyGraph";
 import DownloadProgressBar from "@/components/DownloadProgressBar";
@@ -46,6 +48,7 @@ import {
   fetchHistoryList,
   loadHistoryItem,
   pauseMediaDownload,
+  requestBackendRestart,
   resumeMediaDownload,
   saveApiKeyToLocal,
   sendChatFollowUp,
@@ -67,7 +70,9 @@ import {
   VideoAnalysisResponse,
 } from "@/types/knowledge";
 
-type RightTab = "graph" | "flowchart" | "layers" | "transcript" | "chat";
+type RightTab = "graph" | "flowchart" | "layers" | "concepts" | "transcript" | "chat";
+
+const CURRENT_FRONTEND_BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID || "";
 
 const LEVEL_LABELS: Record<UserLevel, string> = {
   beginner: "初學者",
@@ -121,8 +126,93 @@ export default function HomePage() {
   );
   const backendStatusRef = useRef<"checking" | "online" | "offline">("checking");
   const syncingRef = useRef(false);
+  const autoUpdatingRef = useRef(false);
+  const busyRef = useRef(false);
+  const lastUpdateCheckRef = useRef(0);
   const [reconnecting, setReconnecting] = useState(false);
   const [isMac, setIsMac] = useState(false);
+
+  useEffect(() => {
+    busyRef.current = analyzing || quickDownloading !== null;
+  }, [analyzing, quickDownloading]);
+
+  const clearClientCachesAndReload = async (newBuildId: string) => {
+    try {
+      sessionStorage.setItem("yt_sum_reloaded_build", newBuildId);
+    } catch {
+      // ignore storage errors
+    }
+    try {
+      if ("serviceWorker" in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        reg?.active?.postMessage({ type: "CLEAR_CACHES" });
+        await reg?.update().catch(() => {});
+      }
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch {
+      // ignore cache errors
+    }
+    window.location.reload();
+  };
+
+  const checkAndApplyUpdates = async (h: HealthStatus) => {
+    if (autoUpdatingRef.current || busyRef.current) return;
+
+    // 1. 偵測到後端程式碼更新：先平滑重啟本機後端
+    if (h.backend_stale) {
+      autoUpdatingRef.current = true;
+      showToast("偵測到後端已更新，正在自動無縫重啟服務...");
+      try {
+        await requestBackendRestart();
+        for (let i = 0; i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 600));
+          try {
+            const nextHealth = await fetchHealth();
+            if (!nextHealth.backend_stale) {
+              setHealth(nextHealth);
+              showToast("後端服務已自動更新完成！");
+              autoUpdatingRef.current = false;
+              await checkAndApplyUpdates(nextHealth);
+              return;
+            }
+          } catch {
+            // 等待新進程就緒
+          }
+        }
+      } catch {
+        // 若非本機啟動或重啟失敗，不阻斷目前使用
+      } finally {
+        autoUpdatingRef.current = false;
+      }
+      return;
+    }
+
+    // 2. 偵測到前端建置更新（PWA 與網頁版）：自動清快取並重新載入
+    if (
+      typeof window !== "undefined" &&
+      window.location.port !== "3000" &&
+      h.frontend_build_id &&
+      CURRENT_FRONTEND_BUILD_ID &&
+      h.frontend_build_id !== CURRENT_FRONTEND_BUILD_ID
+    ) {
+      let alreadyReloaded = "";
+      try {
+        alreadyReloaded = sessionStorage.getItem("yt_sum_reloaded_build") || "";
+      } catch {
+        alreadyReloaded = "";
+      }
+      if (alreadyReloaded === h.frontend_build_id) return;
+
+      autoUpdatingRef.current = true;
+      showToast("偵測到新版介面，正在自動更新...");
+      setTimeout(() => {
+        clearClientCachesAndReload(h.frontend_build_id!);
+      }, 600);
+    }
+  };
 
   const refreshHistory = () => {
     fetchHistoryList()
@@ -153,6 +243,8 @@ export default function HomePage() {
       if (wasOffline && options?.announceReconnect) {
         showToast("已重新連線本機後端服務，歷史紀錄已同步！");
       }
+      lastUpdateCheckRef.current = Date.now();
+      void checkAndApplyUpdates(h);
     } catch {
       setHealth(null);
       backendStatusRef.current = "offline";
@@ -190,6 +282,18 @@ export default function HomePage() {
     }
 
     syncFromBackend();
+
+    const handleResumeCheck = () => {
+      if (document.visibilityState && document.visibilityState !== "visible") return;
+      if (Date.now() - lastUpdateCheckRef.current < 30_000) return;
+      syncFromBackend();
+    };
+    document.addEventListener("visibilitychange", handleResumeCheck);
+    window.addEventListener("focus", handleResumeCheck);
+    return () => {
+      document.removeEventListener("visibilitychange", handleResumeCheck);
+      window.removeEventListener("focus", handleResumeCheck);
+    };
   }, []);
 
   useEffect(() => {
@@ -1068,6 +1172,17 @@ export default function HomePage() {
                     三層知識結構
                   </button>
                   <button
+                    onClick={() => setViewMode("concepts")}
+                    className={`text-xs px-3 py-1.5 rounded-md font-medium inline-flex items-center gap-1.5 cursor-pointer transition ${
+                      viewMode === "concepts"
+                        ? "bg-blue-600 text-white"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+                    }`}
+                  >
+                    <BookOpen className="w-3.5 h-3.5" />
+                    觀念解說
+                  </button>
+                  <button
                     onClick={() => setViewMode("transcript")}
                     className={`text-xs px-3 py-1.5 rounded-md font-medium inline-flex items-center gap-1.5 cursor-pointer transition ${
                       viewMode === "transcript"
@@ -1136,6 +1251,27 @@ export default function HomePage() {
                     masteredIds={masteredIds}
                     onToggleMastered={handleToggleMastered}
                     onSeekVideo={handleSeekVideo}
+                    onAskInApp={handleAskInApp}
+                    onOpenExternalGemini={handleOpenExternalGemini}
+                    onNotify={showToast}
+                  />
+                ) : viewMode === "concepts" ? (
+                  <ConceptGuidePanel
+                    data={analysis}
+                    apiKey={apiKey}
+                    onConceptsUpdated={(guides) => {
+                      setAnalysis((prev) => {
+                        if (!prev) return prev;
+                        const updated = { ...prev, concept_guides: guides };
+                        saveCachedHistoryItem(updated.video_id, {
+                          analysis: updated,
+                          mastered_ids: Array.from(masteredIds),
+                          chat_messages: chatMessages,
+                          saved_at: new Date().toISOString(),
+                        });
+                        return updated;
+                      });
+                    }}
                     onAskInApp={handleAskInApp}
                     onOpenExternalGemini={handleOpenExternalGemini}
                     onNotify={showToast}

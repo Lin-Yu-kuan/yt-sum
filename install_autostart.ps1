@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendDir = Join-Path $RootDir "backend"
@@ -48,7 +48,21 @@ shell.Run """$PythonEscaped"" -m uvicorn main:app --host 127.0.0.1 --port 8000 -
 "@
 [System.IO.File]::WriteAllText($VbsPath, $VbsContent, [System.Text.Encoding]::Unicode)
 
-Write-Host "[3/3] 檢查並背景啟動後端服務..." -ForegroundColor Cyan
+Write-Host "[3/3] 檢查並背景啟動最新後端服務..." -ForegroundColor Cyan
+$StoppedOld = 0
+$ExistingProcs = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue
+foreach ($p in $ExistingProcs) {
+    $cmd = $p.CommandLine
+    if ($cmd -and $cmd.Contains($BackendDir) -and $cmd.Contains("uvicorn")) {
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        $StoppedOld++
+    }
+}
+if ($StoppedOld -gt 0) {
+    Write-Host "已替換 $StoppedOld 個舊版背景服務行程。" -ForegroundColor Yellow
+    Start-Sleep -Milliseconds 500
+}
+
 $IsUp = $false
 try {
     $res = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/health" -UseBasicParsing -TimeoutSec 2
