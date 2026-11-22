@@ -115,13 +115,25 @@ def _normalize_analysis_to_zh_tw(analysis: dict) -> dict:
             for ch in normalized["chapters"]
         ]
 
+    if isinstance(normalized.get("concept_overview"), dict):
+        ov = dict(normalized["concept_overview"])
+        for k in ("core_question", "mental_model", "end_to_end_guide"):
+            if isinstance(ov.get(k), str):
+                ov[k] = to_traditional_chinese(ov[k])
+        if isinstance(ov.get("pitfalls_and_tips"), list):
+            ov["pitfalls_and_tips"] = [
+                to_traditional_chinese(tip) if isinstance(tip, str) else tip
+                for tip in ov["pitfalls_and_tips"]
+            ]
+        normalized["concept_overview"] = ov
+
     if isinstance(normalized.get("concept_guides"), list):
         normalized["concept_guides"] = [
             {
                 **item,
                 **{
                     k: to_traditional_chinese(item[k])
-                    for k in ("title", "one_line_definition", "detailed_explanation")
+                    for k in ("title", "role_in_big_picture", "one_line_definition", "detailed_explanation")
                     if isinstance(item.get(k), str)
                 },
             }
@@ -240,13 +252,18 @@ def update_history_transcript(
 def update_history_concept_guides(
     video_id: str,
     concept_guides: list[dict],
+    concept_overview: dict | None = None,
 ) -> bool:
-    """將按需生成的觀念解說快取寫回本機歷史紀錄"""
+    """將按需生成的觀念解說（含全片主軸講義）快取寫回本機歷史紀錄"""
     path = _safe_video_path(video_id)
     if not path.exists():
         return False
     data = json.loads(path.read_text(encoding="utf-8"))
     analysis = data.setdefault("analysis", {})
+    if concept_overview is not None:
+        analysis["concept_overview"] = concept_overview
+    else:
+        analysis.pop("concept_overview", None)
     analysis["concept_guides"] = concept_guides
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return True

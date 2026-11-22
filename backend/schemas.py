@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Literal
 from pydantic import BaseModel, Field
 
@@ -82,6 +84,50 @@ class TranscriptLine(BaseModel):
     text: str
 
 
+class ConceptOverview(BaseModel):
+    """全片核心主軸講義：先回答觀眾最想搞懂的核心問題，並給出端到端完整閉環"""
+    core_question: str = Field(
+        default="",
+        description="站在觀眾視角，這支影片最核心想解決的問題或學會的目標（1句話，台灣繁體中文）",
+    )
+    mental_model: str = Field(
+        default="",
+        description="用生活化比喻建立貫穿全片的整體心智模型（2~4句，讓讀者瞬間建立畫面感，台灣繁體中文）",
+    )
+    end_to_end_guide: str = Field(
+        default="",
+        description=(
+            "不跳步、不切碎的端到端完整主軸解說（使用乾淨 Markdown：### 階段/步驟標題、編號清單、條列對比、**粗體重點**）。"
+            "若是實作教學片，必須從起點串到『最終真正可用』的每一個必要步驟並說明少了會怎樣；"
+            "若是原理科普片，必須串起『痛點 → 運作機制 → 結果』；"
+            "若是觀點方法論片，必須串起『問題 → 判斷框架 → 落地做法』。"
+        ),
+    )
+    pitfalls_and_tips: list[str] = Field(
+        default_factory=list,
+        description="2~4 條導師實戰提醒、操作禁忌、避坑指南或選型決策建議（台灣繁體中文）",
+    )
+
+
+class ConceptGuideItem(BaseModel):
+    """依附於核心主軸的關鍵觀念／環節深化拆解"""
+    id: str = Field(description="唯一識別碼，例如 g1, g2")
+    title: str = Field(description="觀念或關鍵環節名稱（必須使用台灣繁體中文，可於括號附英文專有名詞）")
+    role_in_big_picture: str = Field(
+        default="",
+        description="回答 So What：這個觀念掛在主軸的哪個位置？不懂它會卡住什麼或做錯什麼決定？（1~2句，台灣繁體中文）",
+    )
+    one_line_definition: str = Field(
+        description="一句話精準定義此觀念（必須使用台灣繁體中文，嚴禁簡體中文）"
+    )
+    detailed_explanation: str = Field(
+        description=(
+            "使用乾淨 Markdown（### 小標題、條列清單、比較表格、**粗體重點**）展開主軸中值得深化的選項比較、"
+            "底層原理或進階操作，避免超過 3 行的純文字牆（必須使用台灣繁體中文，嚴禁簡體中文）"
+        )
+    )
+
+
 class VideoAnalysisResponse(BaseModel):
     video_id: str
     title: str
@@ -101,8 +147,11 @@ class VideoAnalysisResponse(BaseModel):
     transcript_zh_tw_lines: list[TranscriptLine] = Field(
         default_factory=list, description="繁體中文逐字稿行列表（按需翻譯後快取）"
     )
+    concept_overview: ConceptOverview | None = Field(
+        default=None, description="全片核心主軸講義（按需生成後快取）"
+    )
     concept_guides: list[ConceptGuideItem] = Field(
-        default_factory=list, description="綜觀整支影片的主題式觀念解說（按需生成後快取）"
+        default_factory=list, description="依附於主軸的關鍵環節深化拆解（按需生成後快取）"
     )
 
 
@@ -141,23 +190,15 @@ class ChatMessage(BaseModel):
     content: str
 
 
-class ConceptGuideItem(BaseModel):
-    """綜觀整支影片後的主題式完整觀念解說（不受影片時間順序限制）"""
-    id: str = Field(description="唯一識別碼，例如 g1, g2")
-    title: str = Field(description="觀念名稱（必須使用台灣繁體中文，可於括號附英文專有名詞）")
-    one_line_definition: str = Field(
-        description="一句話精準定義此觀念（必須使用台灣繁體中文，嚴禁簡體中文）"
-    )
-    detailed_explanation: str = Field(
-        description="不受影片時間順序與章節切分限制的完整系統化解說。依影片主題性質自由組織段落與闡述方式，將散落於整支影片的相關資訊整合成獨立可讀的深度解說（必須使用台灣繁體中文，嚴禁簡體中文，使用清楚的分段純文字，避免雜亂的原始 Markdown 符號）"
-    )
-
-
 class GeminiConceptGuidesOutput(BaseModel):
-    """Gemini 按需生成的觀念解說列表"""
+    """Gemini 按需生成的完整觀念解說（主軸閉環 + 關鍵深化）"""
+    concept_overview: ConceptOverview | None = Field(
+        default=None,
+        description="貫穿全片的核心問題、心智模型、端到端完整主軸與避坑指南",
+    )
     concept_guides: list[ConceptGuideItem] = Field(
         default_factory=list,
-        description="3~6 個綜觀整支影片後想傳達的核心觀念完整解說",
+        description="2~4 個依附於主軸的關鍵環節深化拆解（例如方案比較、進階操作、底層原理），避免與主軸重複流水帳",
     )
 
 
@@ -169,6 +210,7 @@ class GenerateConceptGuidesRequest(BaseModel):
 
 class GenerateConceptGuidesResponse(BaseModel):
     video_id: str
+    concept_overview: ConceptOverview | None = None
     concept_guides: list[ConceptGuideItem] = Field(default_factory=list)
     cached: bool = False
 

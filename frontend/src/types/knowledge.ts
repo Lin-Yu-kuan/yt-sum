@@ -44,15 +44,24 @@ export interface TranscriptLine {
   text: string;
 }
 
+export interface ConceptOverview {
+  core_question: string;
+  mental_model: string;
+  end_to_end_guide: string;
+  pitfalls_and_tips: string[];
+}
+
 export interface ConceptGuideItem {
   id: string;
   title: string;
+  role_in_big_picture?: string;
   one_line_definition: string;
   detailed_explanation: string;
 }
 
 export interface GenerateConceptGuidesResponse {
   video_id: string;
+  concept_overview?: ConceptOverview | null;
   concept_guides: ConceptGuideItem[];
   cached: boolean;
 }
@@ -74,6 +83,7 @@ export interface VideoAnalysisResponse {
   transcript_language?: string;
   transcript_lines?: TranscriptLine[];
   transcript_zh_tw_lines?: TranscriptLine[];
+  concept_overview?: ConceptOverview | null;
   concept_guides?: ConceptGuideItem[];
 }
 

@@ -903,7 +903,11 @@ def test_terminate_process_tree_handles_none():
 
 def test_generate_concept_guides_caches_and_normalizes_zh_tw(tmp_path, monkeypatch):
     import main as main_module
-    from schemas import ConceptGuideItem
+    from schemas import (
+        ConceptGuideItem,
+        ConceptOverview,
+        GeminiConceptGuidesOutput,
+    )
 
     hist_dir = tmp_path / "history"
     monkeypatch.setattr(history_service, "HISTORY_DIR", hist_dir)
@@ -933,9 +937,9 @@ def test_generate_concept_guides_caches_and_normalizes_zh_tw(tmp_path, monkeypat
             "extensions": [],
             "graph_edges": [],
             "transcript_excerpt": (
-                "這是一段超過一百二十個字元的完整逐字稿脈絡內容，用來測試觀念解說生成端點會優先採用逐字稿與摘要整合生成，"
-                "並確保所有簡體字彙都能被正確轉換為台灣繁體中文與慣用語。記憶體與伺服器快取是系統效能優化的關鍵核心，"
-                "透過減少磁碟隨機存取，可以讓整體架構的延遲大幅降低。"
+                "這是一段超過一百二十個字元的完整逐字稿脈絡內容，用來測試觀念解說生成端點會直接採用完整逐字稿，"
+                "不會前置塞入碎片化的分段摘要，並確保所有簡體字彙都能被正確轉換為台灣繁體中文與慣用語。"
+                "記憶體與伺服器快取是系統效能優化的關鍵核心，透過減少磁碟隨機存取，可以讓整體架構的延遲大幅降低。"
             ),
             "transcript_lines": [],
             "transcript_zh_tw_lines": [],
@@ -943,20 +947,33 @@ def test_generate_concept_guides_caches_and_normalizes_zh_tw(tmp_path, monkeypat
     )
 
     call_count = 0
+    captured_contexts: list[str] = []
 
     def fake_generate(**kwargs):
         nonlocal call_count
         call_count += 1
-        return gemini_service.normalize_concept_guides_to_zh_tw(
-            [
+        captured_contexts.append(kwargs.get("context_text", ""))
+        raw = GeminiConceptGuidesOutput(
+            concept_overview=ConceptOverview(
+                core_question="如何从零配置服务器内存快取并让服务正式可用？",
+                mental_model="把内存快取想象成书桌上的常用文件夹，不用每次都去仓库（磁盘）翻找。",
+                end_to_end_guide="### 第一步：建立快取池\n1. 配置内存空间。\n### 第二步：挂载接口\n2. 绑定服务端口才能真正读写。",
+                pitfalls_and_tips=[
+                    "切勿分配超过实体内存上限，否则服务会崩溃。",
+                    "删除快取前必须先卸载应用连线。",
+                ],
+            ),
+            concept_guides=[
                 ConceptGuideItem(
                     id="g1",
                     title="服务器内存快取",
+                    role_in_big_picture="位于核心主轴的存储选型阶段，决定读取速度与稳定性。",
                     one_line_definition="把常用数据暂时放在内存以加速读取。",
-                    detailed_explanation="本视频从头到尾透过不同案例说明软件如何管理内存，避免频繁读写磁盘。",
+                    detailed_explanation="### 运作机制\n- 减少频繁读写磁盘。\n- **提升软件响应速度**。",
                 )
-            ]
+            ],
         )
+        return gemini_service.normalize_concept_output_to_zh_tw(raw)
 
     monkeypatch.setattr(main_module, "generate_concept_guides_with_gemini", fake_generate)
     monkeypatch.setattr(
@@ -971,16 +988,30 @@ def test_generate_concept_guides_caches_and_normalizes_zh_tw(tmp_path, monkeypat
     body1 = res1.json()
     assert body1["cached"] is False
     assert call_count == 1
+    # 確認沒有前置塞入碎片化的 core_concepts「分段摘要參考」造成錨定偏誤
+    assert "分段摘要參考" not in captured_contexts[0]
+
+    ov1 = body1["concept_overview"]
+    assert ov1 is not None
+    assert "伺服器" in ov1["core_question"]
+    assert "記憶體" in ov1["core_question"]
+    assert "磁碟" in ov1["mental_model"]
+    assert "掛載" in ov1["end_to_end_guide"]
+    assert "實體記憶體" in ov1["pitfalls_and_tips"][0]
+
     assert len(body1["concept_guides"]) == 1
-    assert "伺服器" in body1["concept_guides"][0]["title"]
-    assert "記憶體" in body1["concept_guides"][0]["one_line_definition"]
-    assert "影片" in body1["concept_guides"][0]["detailed_explanation"]
-    assert "磁碟" in body1["concept_guides"][0]["detailed_explanation"]
+    g1 = body1["concept_guides"][0]
+    assert "伺服器" in g1["title"]
+    assert "位於" in g1["role_in_big_picture"]
+    assert "記憶體" in g1["one_line_definition"]
+    assert "磁碟" in g1["detailed_explanation"]
+    assert "軟體" in g1["detailed_explanation"]
 
     # 二次呼叫：直接命中快取，不重打 Gemini
     res2 = client.post("/api/concepts/generate", json={"video_id": video_id})
     assert res2.status_code == 200
     assert res2.json()["cached"] is True
+    assert res2.json()["concept_overview"]["core_question"] == ov1["core_question"]
     assert call_count == 1
 
     # force=True：強制重新生成
@@ -989,9 +1020,43 @@ def test_generate_concept_guides_caches_and_normalizes_zh_tw(tmp_path, monkeypat
     assert res3.json()["cached"] is False
     assert call_count == 2
 
-    # 歷史詳細紀錄應已持久化 concept_guides
+    # 歷史詳細紀錄應已持久化 concept_overview 與 concept_guides
     saved = client.get(f"/api/history/{video_id}").json()
+    assert saved["analysis"]["concept_overview"]["core_question"] == ov1["core_question"]
     assert len(saved["analysis"]["concept_guides"]) == 1
+
+    # 向後相容測試：舊版快取沒有 concept_overview 時仍能正常載入回傳
+    legacy_id = "8II52RQBxUE"
+    history_service.save_history(
+        {
+            "video_id": legacy_id,
+            "title": "舊版紀錄",
+            "channel": "Test",
+            "duration_seconds": 100,
+            "transcript_source": "zh-TW",
+            "level": "intermediate",
+            "video_summary_one_liner": "舊版測試。",
+            "prerequisites": [],
+            "core_concepts": [],
+            "extensions": [],
+            "graph_edges": [],
+            "transcript_excerpt": "x" * 200,
+            "concept_guides": [
+                {
+                    "id": "g_old",
+                    "title": "舊版觀念",
+                    "one_line_definition": "舊版定義",
+                    "detailed_explanation": "舊版內文",
+                }
+            ],
+        }
+    )
+    legacy_res = client.post("/api/concepts/generate", json={"video_id": legacy_id})
+    assert legacy_res.status_code == 200
+    legacy_body = legacy_res.json()
+    assert legacy_body["cached"] is True
+    assert legacy_body["concept_overview"] is None
+    assert legacy_body["concept_guides"][0]["title"] == "舊版觀念"
 
 
 def test_health_includes_version_and_no_store_headers(monkeypatch):

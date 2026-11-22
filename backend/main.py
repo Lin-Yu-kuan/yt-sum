@@ -25,7 +25,9 @@ from schemas import (
     ChatRequest,
     ChatResponse,
     ConceptGuideItem,
+    ConceptOverview,
     DownloadRequest,
+    GeminiConceptGuidesOutput,
     GenerateConceptGuidesRequest,
     GenerateConceptGuidesResponse,
     TranscriptLine,
@@ -873,10 +875,14 @@ def generate_concept_guides_endpoint(req: GenerateConceptGuidesRequest):
         raise HTTPException(status_code=404, detail="找不到此影片的保存紀錄")
 
     analysis = record.get("analysis", {})
+    existing_overview = analysis.get("concept_overview")
     existing_guides = analysis.get("concept_guides") or []
-    if existing_guides and not req.force:
+    if (existing_guides or existing_overview) and not req.force:
         return GenerateConceptGuidesResponse(
             video_id=video_id,
+            concept_overview=ConceptOverview(**existing_overview)
+            if isinstance(existing_overview, dict)
+            else None,
             concept_guides=[ConceptGuideItem(**item) for item in existing_guides],
             cached=True,
         )
@@ -886,10 +892,13 @@ def generate_concept_guides_endpoint(req: GenerateConceptGuidesRequest):
     if level not in ("beginner", "intermediate", "advanced"):
         level = "intermediate"
 
-    # 組合全片脈絡：優先使用完整逐字稿，輔以一句話總結與既有分段摘要
+    # 一句話總結作為全域定錨；避免將碎片化 core_concepts 前置塞在逐字稿前造成錨定偏誤
+    one_liner = str(analysis.get("video_summary_one_liner") or "").strip()
+    one_liner_hint = f"一句話總結：{one_liner}" if one_liner else ""
+
     summary_parts: list[str] = []
-    if analysis.get("video_summary_one_liner"):
-        summary_parts.append(f"一句話總結：{analysis['video_summary_one_liner']}")
+    if one_liner_hint:
+        summary_parts.append(one_liner_hint)
     core_concepts = analysis.get("core_concepts") or []
     if core_concepts:
         bullets = "\n".join(
@@ -907,14 +916,15 @@ def generate_concept_guides_endpoint(req: GenerateConceptGuidesRequest):
         else str(analysis.get("transcript_excerpt") or "").strip()
     )
 
+    concept_output: GeminiConceptGuidesOutput
     try:
         if transcript_text and len(transcript_text) > 120:
             context_text = (
-                f"{summary_hint}\n\n影片逐字稿內容：\n{transcript_text}"
-                if summary_hint
+                f"{one_liner_hint}\n\n影片逐字稿內容：\n{transcript_text}"
+                if one_liner_hint
                 else f"影片逐字稿內容：\n{transcript_text}"
             )
-            guides = generate_concept_guides_with_gemini(
+            concept_output = generate_concept_guides_with_gemini(
                 video_title=video_title,
                 context_text=context_text,
                 level=level,
@@ -923,7 +933,7 @@ def generate_concept_guides_endpoint(req: GenerateConceptGuidesRequest):
         else:
             canonical_url = f"https://www.youtube.com/watch?v={video_id}"
             try:
-                guides = generate_concept_guides_from_youtube_url(
+                concept_output = generate_concept_guides_from_youtube_url(
                     video_title=video_title,
                     youtube_url=canonical_url,
                     level=level,
@@ -935,7 +945,7 @@ def generate_concept_guides_endpoint(req: GenerateConceptGuidesRequest):
             except Exception:
                 if not summary_hint:
                     raise
-                guides = generate_concept_guides_with_gemini(
+                concept_output = generate_concept_guides_with_gemini(
                     video_title=video_title,
                     context_text=summary_hint,
                     level=level,
@@ -949,12 +959,18 @@ def generate_concept_guides_endpoint(req: GenerateConceptGuidesRequest):
             detail=f"觀念解說生成失敗：{format_ytdlp_error(str(exc))}",
         ) from exc
 
-    guide_dicts = [item.model_dump() for item in guides]
-    update_history_concept_guides(video_id, guide_dicts)
+    overview_dict = (
+        concept_output.concept_overview.model_dump()
+        if concept_output.concept_overview is not None
+        else None
+    )
+    guide_dicts = [item.model_dump() for item in concept_output.concept_guides]
+    update_history_concept_guides(video_id, guide_dicts, overview_dict)
 
     return GenerateConceptGuidesResponse(
         video_id=video_id,
-        concept_guides=guides,
+        concept_overview=concept_output.concept_overview,
+        concept_guides=concept_output.concept_guides,
         cached=False,
     )
 

@@ -12,6 +12,7 @@ from google.genai import types
 from schemas import (
     ChatMessage,
     ConceptGuideItem,
+    ConceptOverview,
     GeminiConceptGuidesOutput,
     GeminiKnowledgeOutput,
     GeminiTranscriptOutput,
@@ -591,15 +592,35 @@ def translate_transcript_lines_to_zh_tw(
     ]
 
 
-CONCEPT_GUIDES_SYSTEM_PROMPT = """你是一位頂尖的知識架構師與學習導師。
-使用者已經看過影片的時間軸摘要，現在他需要的是「跳脫影片時間順序與章節切分限制」的【觀念解說】。
-請綜觀整支影片真正想傳達的核心思想、原理或關鍵概念，將散落在影片各處的線索重新整合，提煉出 3~6 個最重要、值得獨立理解的觀念。
+CONCEPT_GUIDES_SYSTEM_PROMPT = """你是一位親切、思路極度清晰的 1 對 1 頂尖學習導師。
+使用者已經看過影片的時間軸分段摘要，最討厭看到把完整流程或因果鏈切得零零碎碎、只講名詞卻讓人看完問「So What？這些要怎麼串起來真正使用？」的百科摘要。
 
-【強制語言與格式規範】
-- 所有內容一律使用【台灣繁體中文】（正體中文與台灣慣用詞彙，嚴禁簡體中文）。
-- 專有名詞可於繁體中文後方以括號保留英文原文（例如：「注意力機制 (Attention)」）。
-- `one_line_definition`：一句話精準定義這個觀念的核心本質。
-- `detailed_explanation`：不受影片敘事順序限制，依影片本身的領域與主題性質，自由組織邏輯連貫的完整系統化解說（可用空行分段，讓閱讀舒適清楚，但請勿使用雜亂的 `**`、`##` 等原始 Markdown 語法）。"""
+你的任務是站在「真正想學會、想搞懂這支影片的觀眾」立場，先建立全片端到端完整閉環，再深化拆解關鍵環節，產出兩層結構化的學習導師講義：
+
+【第一層：全片核心主軸講義 (`concept_overview`)】
+1. `core_question`（觀眾核心目標）：
+   - 先反推：點進這支影片的人，看完最想能做到什麼、解決什麼痛點或真正搞懂什麼？（1 句話精準定錨）
+2. `mental_model`（整體心智模型）：
+   - 用一個貫穿全片的生活化比喻先建立直覺畫面（2~4 句），讓學習者在進入細節前先看懂大局與各元件之間的關係。
+3. `end_to_end_guide`（不跳步、不切碎的端到端完整主軸）：
+   - 依影片性質提供完整因果／操作閉環，**絕對不可漏掉讓成果真正可用或形成閉環的關鍵步驟**：
+     * **實作／操作教學型影片**：必須從「起點準備」一路串到「最終真正可用、看得到成果」的每一個必要階段（例如建置儲存架構時，從整合實體資源、建立邏輯配置，到最後必須格式化並掛載代號才能讀寫，缺一不可），並清楚說明每一步**為什麼非做不可／少了這步會怎樣**。
+     * **原理／技術架構型影片**：必須完整串起「舊架構痛點 → 輸入條件 → 核心機制如何逐步運作轉換 → 產出結果與邊界」。
+     * **觀點／方法論／商業型影片**：必須完整串起「核心問題 → 判斷框架 → 實務落地步驟」。
+   - 排版規則：必須使用乾淨 Markdown（`### 階段標題`、編號步驟 `1. 2. 3.`、條列、` **粗體重點** `、`` `介面名稱/指令` ``），段落簡潔，**嚴禁超過 3 行的純文字牆**。
+4. `pitfalls_and_tips`（導師小提醒 / 避坑指南）：
+   - 提煉 2~4 條實戰提醒、操作順序禁忌（例如刪除或復原必須遵守的先後順序）、常見迷思、或新手選型決策建議。
+
+【第二層：關鍵環節深化拆解 (`concept_guides`，2~4 個)】
+- **不要**把上面主軸已經交代過的步驟重複寫成流水帳！
+- 只挑選主軸中「需要展開比較的選項（如多種模式的效能/成本/容錯對比）、底層關鍵原理、或重要進階維護操作（如動態擴充、生命週期管理）」作為深化卡。
+- `role_in_big_picture`：必須直接回答「So What？」——說明這個觀念掛在主軸的哪個位置？不懂它實戰上會卡住什麼或做錯什麼決定？（1~2 句）。
+- `one_line_definition`：一句話精準定義其本質。
+- `detailed_explanation`：使用乾淨 Markdown（`###` 小標題、條列對比、必要時使用 Markdown 比較表格 `| 方案 | ... |`、`**粗體重點**`），深入淺出把差異、為什麼與實戰取捨講透徹，禁止純文字牆。
+
+【強制語言規範】
+- 所有內容一律必須使用【台灣繁體中文】（正體中文與台灣慣用詞彙，例如：伺服器、軟體、影片、記憶體、資料庫、演算法、網路、程式、介面、磁碟區、映象），嚴禁簡體中文。
+- 專有名詞可於繁體中文後方以括號保留英文原文（例如：「存放集區 (Storage Pool)」）。"""
 
 
 def normalize_concept_guides_to_zh_tw(
@@ -610,6 +631,7 @@ def normalize_concept_guides_to_zh_tw(
         item.model_copy(
             update={
                 "title": to_traditional_chinese(item.title),
+                "role_in_big_picture": to_traditional_chinese(item.role_in_big_picture),
                 "one_line_definition": to_traditional_chinese(item.one_line_definition),
                 "detailed_explanation": to_traditional_chinese(item.detailed_explanation),
             }
@@ -618,18 +640,43 @@ def normalize_concept_guides_to_zh_tw(
     ]
 
 
+def normalize_concept_output_to_zh_tw(
+    output: GeminiConceptGuidesOutput,
+) -> GeminiConceptGuidesOutput:
+    """將完整觀念解說輸出（含主軸講義與關鍵深化）轉換為台灣繁體中文"""
+    overview = output.concept_overview
+    normalized_overview: ConceptOverview | None = None
+    if overview is not None:
+        normalized_overview = overview.model_copy(
+            update={
+                "core_question": to_traditional_chinese(overview.core_question),
+                "mental_model": to_traditional_chinese(overview.mental_model),
+                "end_to_end_guide": to_traditional_chinese(overview.end_to_end_guide),
+                "pitfalls_and_tips": [
+                    to_traditional_chinese(tip) for tip in overview.pitfalls_and_tips
+                ],
+            }
+        )
+    return output.model_copy(
+        update={
+            "concept_overview": normalized_overview,
+            "concept_guides": normalize_concept_guides_to_zh_tw(output.concept_guides),
+        }
+    )
+
+
 def generate_concept_guides_with_gemini(
     video_title: str,
     context_text: str,
     level: Literal["beginner", "intermediate", "advanced"] = "intermediate",
     api_key_override: str | None = None,
-) -> list[ConceptGuideItem]:
-    """依據影片逐字稿或脈絡，生成跳脫時間軸限制的完整觀念解說"""
+) -> GeminiConceptGuidesOutput:
+    """依據影片逐字稿或脈絡，生成端到端核心主軸講義與關鍵環節深化拆解"""
     client = _get_client(api_key_override)
     prompt = (
         f"影片標題：{video_title}\n"
         f"學習者背景設定：{LEVEL_INSTRUCTIONS.get(level, LEVEL_INSTRUCTIONS['intermediate'])}\n"
-        "請跳脫影片時間順序，綜觀以下全片內容與脈絡，整理出整支影片想傳達的核心「觀念解說」。\n\n"
+        "請綜觀以下全片逐字稿與脈絡，從觀眾想真正學會與落地的角度，整理出「全片核心主軸講義（端到端完整閉環）」以及「關鍵環節深化拆解」。\n\n"
         f"{context_text[:120_000]}"
     )
     response = _generate_with_fallback(
@@ -639,7 +686,7 @@ def generate_concept_guides_with_gemini(
             system_instruction=CONCEPT_GUIDES_SYSTEM_PROMPT,
             response_mime_type="application/json",
             response_schema=GeminiConceptGuidesOutput,
-            temperature=0.35,
+            temperature=0.45,
         ),
     )
     parsed = (
@@ -647,7 +694,7 @@ def generate_concept_guides_with_gemini(
         if response.parsed is not None
         else GeminiConceptGuidesOutput.model_validate_json(response.text)
     )
-    return normalize_concept_guides_to_zh_tw(parsed.concept_guides)
+    return normalize_concept_output_to_zh_tw(parsed)
 
 
 def generate_concept_guides_from_youtube_url(
@@ -656,7 +703,7 @@ def generate_concept_guides_from_youtube_url(
     level: Literal["beginner", "intermediate", "advanced"] = "intermediate",
     api_key_override: str | None = None,
     summary_hint: str = "",
-) -> list[ConceptGuideItem]:
+) -> GeminiConceptGuidesOutput:
     """無逐字稿時的備援：直接請 Gemini 觀看 YouTube 影片生成完整觀念解說"""
     client = _get_client(api_key_override)
     hint_block = f"\n既有影片摘要參考：\n{summary_hint[:10_000]}\n" if summary_hint else ""
@@ -664,7 +711,7 @@ def generate_concept_guides_from_youtube_url(
         f"影片標題：{video_title}\n"
         f"學習者背景設定：{LEVEL_INSTRUCTIONS.get(level, LEVEL_INSTRUCTIONS['intermediate'])}\n"
         f"{hint_block}"
-        "請直接觀看與聆聽這支 YouTube 影片，跳脫時間軸與章節順序，綜觀整支影片想傳達的核心思想，整理出 3~6 個完整的「觀念解說」。"
+        "請直接觀看與聆聽這支 YouTube 影片，從觀眾想真正學會與落地的角度，整理出「全片核心主軸講義（端到端完整閉環）」以及「關鍵環節深化拆解」。"
     )
     contents = types.Content(
         parts=[
@@ -679,7 +726,7 @@ def generate_concept_guides_from_youtube_url(
             system_instruction=CONCEPT_GUIDES_SYSTEM_PROMPT,
             response_mime_type="application/json",
             response_schema=GeminiConceptGuidesOutput,
-            temperature=0.35,
+            temperature=0.45,
         ),
     )
     parsed = (
@@ -687,4 +734,4 @@ def generate_concept_guides_from_youtube_url(
         if response.parsed is not None
         else GeminiConceptGuidesOutput.model_validate_json(response.text)
     )
-    return normalize_concept_guides_to_zh_tw(parsed.concept_guides)
+    return normalize_concept_output_to_zh_tw(parsed)

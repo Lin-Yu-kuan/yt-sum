@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Send, Sparkles, Trash2 } from "lucide-react";
+import MarkdownContent from "@/components/MarkdownContent";
 import { ChatMessage } from "@/types/knowledge";
 
 interface DeepDiveChatProps {
@@ -55,25 +56,29 @@ export default function DeepDiveChat({
         )}
       </div>
 
-      <div className="flex-1 py-4 space-y-3 overflow-y-auto max-h-[56vh] text-xs leading-relaxed">
+      <div className="flex-1 py-4 space-y-3 overflow-y-auto max-h-[56vh] text-sm leading-relaxed">
         {messages.length === 0 ? (
-          <div className="p-4 rounded-xl bg-[var(--bg-page)] border border-[var(--border-subtle)] text-[var(--text-muted)]">
+          <div className="p-4 rounded-xl bg-[var(--bg-page)] border border-[var(--border-subtle)] text-[var(--text-muted)] text-xs">
             我已拆解完這部影片的三層知識結構。你可以切回前兩個分頁點擊任何觀念的「深入研究」，或在下方直接輸入你的疑問！
           </div>
         ) : (
           messages.map((m, idx) => (
             <div
               key={idx}
-              className={`p-3.5 rounded-xl border whitespace-pre-wrap ${
+              className={`p-4 rounded-xl border ${
                 m.role === "user"
-                  ? "bg-blue-500/10 border-blue-500/30 ml-8 text-[var(--text-main)]"
+                  ? "bg-blue-500/10 border-blue-500/30 ml-8 text-[var(--text-main)] whitespace-pre-wrap"
                   : "bg-[var(--bg-page)] border-[var(--border-subtle)] mr-6 text-[var(--text-main)]"
               }`}
             >
-              <div className="font-semibold mb-1 text-[11px] uppercase tracking-wide text-[var(--text-muted)]">
+              <div className="font-semibold mb-1.5 text-[11px] uppercase tracking-wide text-[var(--text-muted)]">
                 {m.role === "user" ? "你" : "Gemini 學習導師"}
               </div>
-              {m.content}
+              {m.role === "user" ? (
+                m.content
+              ) : (
+                <MarkdownContent content={m.content} />
+              )}
             </div>
           ))
         )}

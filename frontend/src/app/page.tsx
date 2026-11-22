@@ -64,6 +64,8 @@ import {
 } from "@/lib/offlineCache";
 import {
   ChatMessage,
+  ConceptGuideItem,
+  ConceptOverview,
   HealthStatus,
   HistorySummaryItem,
   UserLevel,
@@ -1259,10 +1261,14 @@ export default function HomePage() {
                   <ConceptGuidePanel
                     data={analysis}
                     apiKey={apiKey}
-                    onConceptsUpdated={(guides) => {
+                    onConceptsUpdated={({ concept_overview, concept_guides }) => {
                       setAnalysis((prev) => {
                         if (!prev) return prev;
-                        const updated = { ...prev, concept_guides: guides };
+                        const updated = {
+                          ...prev,
+                          concept_overview: concept_overview ?? null,
+                          concept_guides,
+                        };
                         saveCachedHistoryItem(updated.video_id, {
                           analysis: updated,
                           mastered_ids: Array.from(masteredIds),
